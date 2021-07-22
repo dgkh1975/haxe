@@ -287,9 +287,9 @@ let write_mappings ctx smap =
 	output_string channel "{\n";
 	output_string channel "\"version\":3,\n";
 	output_string channel ("\"file\":\"" ^ (String.concat "\\\\" (ExtString.String.nsplit basefile "\\")) ^ "\",\n");
-	output_string channel ("\"sourceRoot\":\"file:///\",\n");
+	output_string channel ("\"sourceRoot\":\"\",\n");
 	output_string channel ("\"sources\":[" ^
-		(String.concat "," (List.map (fun s -> "\"" ^ to_url s ^ "\"") sources)) ^
+		(String.concat "," (List.map (fun s -> "\"file:///" ^ to_url s ^ "\"") sources)) ^
 		"],\n");
 	if Common.defined ctx.com Define.SourceMapContent then begin
 		output_string channel ("\"sourcesContent\":[" ^
@@ -1243,6 +1243,8 @@ let gen_class_static_field ctx c cl_path f =
 let can_gen_class_field ctx = function
 	| { cf_expr = (None | Some { eexpr = TConst TNull }) } when not (has_feature ctx "Type.getInstanceFields") ->
 		false
+	| f when has_class_field_flag f CfExtern ->
+		false
 	| f ->
 		is_physical_field f
 
@@ -1887,19 +1889,24 @@ let generate com =
 		| _ -> ()
 	) include_files;
 
-	let var_console = (
-		"console",
-		"typeof console != \"undefined\" ? console : {log:function(){}}"
-	) in
+	let defined_global_value = Common.defined_value_safe com Define.JsGlobal in
+
+	let defined_global = defined_global_value <> "" in
+
+	let rec typeof_join = function
+	| x :: [] -> x
+	| x :: l -> "typeof " ^ x ^ " != \"undefined\" ? " ^ x ^ " : " ^ (typeof_join l)
+	| _ -> ""
+	in
 
 	let var_exports = (
 		"$hx_exports",
-		"typeof exports != \"undefined\" ? exports : typeof window != \"undefined\" ? window : typeof self != \"undefined\" ? self : this"
+		typeof_join (if defined_global then ["exports"; defined_global_value] else ["exports"; "window"; "self"; "this"])
 	) in
 
 	let var_global = (
 		"$global",
-		"typeof window != \"undefined\" ? window : typeof global != \"undefined\" ? global : typeof self != \"undefined\" ? self : this"
+		typeof_join (if defined_global then [defined_global_value] else ["window"; "global"; "self"; "this"])
 	) in
 
 	let closureArgs = [var_global] in
@@ -1910,7 +1917,7 @@ let generate com =
 	in
 	(* Provide console for environments that may not have it. *)
 	let closureArgs = if ctx.es_version < 5 then
-		var_console :: closureArgs
+		("console", typeof_join ["console"; "{log:function(){}}"]) :: closureArgs
 	else
 		closureArgs
 	in
@@ -2065,7 +2072,7 @@ let generate com =
 	| Some e -> gen_expr ctx e; newline ctx);
 	if ctx.js_modern then begin
 		let closureArgs =
-			if has_feature ctx "js.Lib.global" then
+			if has_feature ctx "js.Lib.global" || defined_global then
 				closureArgs
 			else
 				(* no need for `typeof window != "undefined" ? window : typeof global != "undefined" ? <...>` *)

@@ -108,11 +108,7 @@ let maybe_type_against_enum ctx f with_type iscall p =
 							(try Type.unify t' t with Unify_error _ -> ());
 							AKExpr e
 						| _ ->
-							if iscall then
-								AKExpr e
-							else begin
-								AKExpr (AbstractCast.cast_or_unify ctx t e e.epos)
-							end
+							AKExpr e
 					end
 				| _ -> e (* ??? *)
 			end
@@ -1598,10 +1594,16 @@ and type_call ?(mode=MGet) ctx e el (with_type:WithType.t) inline p =
 			| TFun signature -> type_bind ctx e signature args p
 			| _ -> def ())
 	| (EConst (Ident "$type"),_) , [e] ->
-		let e = type_expr ctx e WithType.value in
-		ctx.com.warning (s_type (print_context()) e.etype) e.epos;
-		let e = Diagnostics.secure_generated_code ctx e in
-		e
+		begin match fst e with
+		| EConst (Ident "_") ->
+			ctx.com.warning (WithType.to_string with_type) p;
+			mk (TConst TNull) t_dynamic p
+		| _ ->
+			let e = type_expr ctx e WithType.value in
+			ctx.com.warning (s_type (print_context()) e.etype) e.epos;
+			let e = Diagnostics.secure_generated_code ctx e in
+			e
+		end
 	| (EField(e,"match"),p), [epat] ->
 		let et = type_expr ctx e WithType.value in
 		let rec has_enum_match t = match follow t with
@@ -1794,8 +1796,6 @@ and type_expr ?(mode=MGet) ctx (e,p) (with_type:WithType.t) =
 		type_cast ctx e t p
 	| EDisplay (e,dk) ->
 		TyperDisplay.handle_edisplay ctx e dk mode with_type
-	| EDisplayNew t ->
-		die "" __LOC__
 	| ECheckType (e,t) ->
 		let t = Typeload.load_complex_type ctx true t in
 		let e = type_expr ctx e (WithType.with_type t) in
@@ -1808,7 +1808,10 @@ and type_expr ?(mode=MGet) ctx (e,p) (with_type:WithType.t) =
 		| CTPath tp ->
 			if tp.tparams <> [] then display_error ctx "Type parameters are not supported for the `is` operator" p_t;
 			let e = type_expr ctx e WithType.value in
-			let e_t = type_type ctx (tp.tpackage,tp.tname) p_t in
+			let mt = Typeload.load_type_def ctx p_t tp in
+			if ctx.in_display && DisplayPosition.display_position#enclosed_in p_t then
+				DisplayEmitter.display_module_type ctx mt p_t;
+			let e_t = type_module_type ctx mt None p_t in
 			let e_Std_isOfType =
 				match Typeload.load_type_raise ctx ([],"Std") "Std" p with
 				| TClassDecl c ->

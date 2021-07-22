@@ -21,7 +21,6 @@ type 'value compiler_api = {
 	parse_string : string -> Globals.pos -> bool -> Ast.expr;
 	type_expr : Ast.expr -> Type.texpr;
 	resolve_type  : Ast.complex_type -> Globals.pos -> t;
-	type_macro_expr : Ast.expr -> Type.texpr;
 	store_typed_expr : Type.texpr -> Ast.expr;
 	allow_package : string -> unit;
 	type_patch : string -> string -> bool -> string option -> unit;
@@ -50,6 +49,7 @@ type 'value compiler_api = {
 	encode_ctype : Ast.type_hint -> 'value;
 	decode_type : 'value -> t;
 	flush_context : (unit -> t) -> t;
+	display_error : (string -> pos -> unit);
 }
 
 
@@ -495,16 +495,14 @@ and encode_expr e =
 				23, [loop e; null encode_ctype t]
 			| EDisplay (e,dk) ->
 				24, [loop e; encode_display_kind dk]
-			| EDisplayNew t ->
-				25, [encode_path t]
 			| ETernary (econd,e1,e2) ->
-				26, [loop econd;loop e1;loop e2]
+				25, [loop econd;loop e1;loop e2]
 			| ECheckType (e,t) ->
-				27, [loop e; encode_ctype t]
+				26, [loop e; encode_ctype t]
 			| EMeta (m,e) ->
-				28, [encode_meta_entry m;loop e]
+				27, [encode_meta_entry m;loop e]
 			| EIs (e,t) ->
-				29, [loop e;encode_ctype t]
+				28, [loop e;encode_ctype t]
 		in
 		encode_obj [
 			"pos", encode_pos p;
@@ -823,15 +821,13 @@ and decode_expr v =
 			ECast (loop e,opt decode_ctype t)
 		| 24, [e;dk] ->
 			EDisplay (loop e,decode_display_kind dk)
-		| 25, [t] ->
-			EDisplayNew (decode_path t)
-		| 26, [e1;e2;e3] ->
+		| 25, [e1;e2;e3] ->
 			ETernary (loop e1,loop e2,loop e3)
-		| 27, [e;t] ->
+		| 26, [e;t] ->
 			ECheckType (loop e, (decode_ctype t))
-		| 28, [m;e] ->
+		| 27, [m;e] ->
 			EMeta (decode_meta_entry m,loop e)
-		| 29, [e;t] ->
+		| 28, [e;t] ->
 			EIs (loop e,decode_ctype t)
 		| _ ->
 			raise Invalid_expr
@@ -1572,6 +1568,12 @@ let macro_api ccom get_api =
 			let p = decode_pos p in
 			raise (Error.Fatal_error (msg,p))
 		);
+		"report_error", vfun2 (fun msg p ->
+			let msg = decode_string msg in
+			let p = decode_pos p in
+			(get_api()).display_error msg p;
+			vnull
+		);
 		"warning", vfun2 (fun msg p ->
 			let msg = decode_string msg in
 			let p = decode_pos p in
@@ -1901,6 +1903,13 @@ let macro_api ccom get_api =
 		"store_typed_expr", vfun1 (fun e ->
 			let e = decode_texpr e in
 			encode_expr ((get_api()).store_typed_expr e)
+		);
+		"type_and_store_expr", vfun1 (fun e ->
+			let api = get_api() in
+			let te = (api.type_expr (decode_expr e)) in
+			let v_e = encode_expr (api.store_typed_expr te) in
+			let v_to_string () = (s_type (print_context())) te.etype in
+			encode_obj ["expr",v_e;"type",encode_ref te.etype encode_type v_to_string]
 		);
 		"get_output", vfun0 (fun() ->
 			encode_string (ccom()).file

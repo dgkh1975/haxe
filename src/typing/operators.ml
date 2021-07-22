@@ -191,7 +191,7 @@ let unify_int ctx e k =
 		| TAnon a ->
 			(try is_dynamic (PMap.find f a.a_fields).cf_type with Not_found -> false)
 		| TMono m ->
-			begin match Monomorph.classify_constraints m with
+			begin match Monomorph.classify_down_constraints m with
 			| CStructural(fields,_) ->
 				(try is_dynamic (PMap.find f fields).cf_type with Not_found -> false)
 			| _ ->
@@ -468,7 +468,12 @@ let find_abstract_binop_overload ctx op e1 e2 a c tl left is_assign_op with_type
 							error (Printf.sprintf "The result of this operation (%s) is not compatible with declared return type %s" (st t_expected) (st tret)) p
 				end;
 			end;
-			BinopResult.create_normal op e1 e2 tret needs_assign swapped p
+			(*
+				If the `@:op`-field has no expr, then user wants the semantics of an underlying type.
+				which is supposed to make an assignment for AssignOp's.
+				Hence we use `is_assign_op` here instead of `needs_assign`.
+			*)
+			BinopResult.create_normal op e1 e2 tret is_assign_op swapped p
 		end else if swapped then begin
 			let vr = new value_reference ctx in
 			let e2' = vr#as_var "lhs" e2 in
@@ -488,11 +493,18 @@ let find_abstract_binop_overload ctx op e1 e2 a c tl left is_assign_op with_type
 		| _ ->
 			()
 	end;
-	let rec loop find_op ol = match ol with
+	let rec loop find_op ol =
+		match ol with
 		| (op_cf,cf) :: ol when op_cf = find_op ->
 			let is_impl = has_class_field_flag cf CfImpl in
-			begin match follow cf.cf_type with
-				| TFun([(_,_,t1);(_,_,t2)],tret) ->
+			begin
+				match follow cf.cf_type with
+				| TFun((_,_,t1) :: (_,_,t2) :: pos_infos, tret) ->
+					(match pos_infos with
+					| [] -> ()
+					| [_,true,t] when is_pos_infos t -> ()
+					| _ -> die ~p:cf.cf_pos ("Unexpected arguments list of function " ^ cf.cf_name) __LOC__
+					);
 					let check e1 e2 swapped =
 						let map_arguments () =
 							let monos = Monomorph.spawn_constrained_monos (fun t -> t) cf.cf_params in
@@ -662,7 +674,7 @@ let type_assign_op ctx op e1 e2 with_type p =
 	let field_rhs_by_name op name ev with_type =
 		let access_get = type_field_default_cfg ctx ev name p MGet with_type in
 		let e_get = acc_get ctx access_get p in
-		e_get.etype,type_binop2 ctx op e_get e2 true (WithType.with_type e_get.etype) p
+		e_get.etype,type_binop2 ctx op e_get e2 true WithType.value p
 	in
 	let field_rhs op cf ev =
 		field_rhs_by_name op cf.cf_name ev (WithType.with_type cf.cf_type)
@@ -698,7 +710,7 @@ let type_assign_op ctx op e1 e2 with_type p =
 		error "Invalid operation" p
 	| AKExpr e ->
 		let e,vr = process_lhs_expr ctx "lhs" e in
-		let e_rhs = type_binop2 ctx op e e2 true (WithType.with_type e.etype) p in
+		let e_rhs = type_binop2 ctx op e e2 true WithType.value p in
 		assign vr e e_rhs
 	| AKField fa ->
 		let vr = new value_reference ctx in
@@ -730,7 +742,7 @@ let type_assign_op ctx op e1 e2 with_type p =
 		let ekey,ekey' = maybe_bind_to_temp ekey in
 		let ebase,ebase' = maybe_bind_to_temp ebase in
 		let eget = mk_array_get_call ctx (cf_get,tf_get,r_get,ekey,None) c ebase p in
-		let eget = type_binop2 ctx op eget e2 true (WithType.with_type eget.etype) p in
+		let eget = type_binop2 ctx op eget e2 true WithType.value p in
 		let vr = new value_reference ctx in
 		let eget = BinopResult.to_texpr vr eget (fun e -> e) in
 		unify ctx eget.etype r_get p;

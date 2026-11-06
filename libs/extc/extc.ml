@@ -51,6 +51,8 @@ external zlib_crc32 : bytes -> int -> int32 = "zlib_crc32"
 
 external time : unit -> float = "sys_time"
 
+external timestamp_ms : unit -> int64 = "sys_timestamp_ms"
+
 external getch : bool -> int = "sys_getch"
 
 external filetime : string -> float = "sys_filetime"
@@ -110,10 +112,10 @@ let input_zip ?(bufsize=65536) ch =
 	let buf = ref "" in
 	let p = ref 0 in
 	let z = zlib_inflate_init() in
-	let rec fill_buffer() =
+	let fill_buffer() =
 		let rec loop pos len =
 			if len > 0 || pos = 0 then begin
-				let r = zlib_inflate z (Bytes.unsafe_to_string tmp_in) pos len tmp_out 0 bufsize (if pos = 0 && len = 0 then Z_FINISH else Z_SYNC_FLUSH) in
+				let r = zlib_inflate z ~src:(Bytes.unsafe_to_string tmp_in) ~spos:pos ~slen:len ~dst:tmp_out ~dpos:0 ~dlen:bufsize (if pos = 0 && len = 0 then Z_FINISH else Z_SYNC_FLUSH) in
 				Buffer.add_subbytes tmp_buf tmp_out 0 r.z_wrote;
 				loop (pos + r.z_read) (len - r.z_read);
 			end
@@ -155,7 +157,7 @@ let output_zip ?(bufsize=65536) ?(level=9) ch =
 	let tmp_out = Bytes.create bufsize in
 	let p = ref 0 in
 	let rec flush finish =
-		let r = zlib_deflate z (Bytes.unsafe_to_string out) 0 !p tmp_out 0 bufsize (if finish then Z_FINISH else Z_SYNC_FLUSH) in
+		let r = zlib_deflate z ~src:(Bytes.unsafe_to_string out) ~spos:0 ~slen:!p ~dst:tmp_out ~dpos:0 ~dlen:bufsize (if finish then Z_FINISH else Z_SYNC_FLUSH) in
 		ignore(IO.really_output ch tmp_out 0 r.z_wrote);
 		let remain = !p - r.z_read in
 		Bytes.blit out r.z_read out 0 remain;

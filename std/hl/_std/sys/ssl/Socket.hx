@@ -50,7 +50,10 @@ private class SocketInput extends haxe.io.Input {
 		__s.handshake();
 		var r = @:privateAccess __s.ssl.recv(buf, pos, len);
 		if (r == -1)
-			throw haxe.io.Error.Blocked;
+			if (@:privateAccess __s.isBlocking)
+				return 0
+			else
+				throw haxe.io.Error.Blocked;
 		else if (r <= 0)
 			throw new haxe.io.Eof();
 		return r;
@@ -85,7 +88,10 @@ private class SocketOutput extends haxe.io.Output {
 		__s.handshake();
 		var r = @:privateAccess __s.ssl.send(buf, pos, len);
 		if (r == -1)
-			throw haxe.io.Error.Blocked;
+			if (@:privateAccess __s.isBlocking)
+				return 0
+			else
+				throw haxe.io.Error.Blocked;
 		else if (r < 0)
 			throw new haxe.io.Eof();
 		return r;
@@ -123,13 +129,8 @@ class Socket extends sys.net.Socket {
 		__s = sys.net.Socket.socket_new(false);
 		input = new SocketInput(this);
 		output = new SocketOutput(this);
-		if (DEFAULT_VERIFY_CERT && DEFAULT_CA == null) {
-			try {
-				DEFAULT_CA = Certificate.loadDefaults();
-			} catch (e:Dynamic) {}
-		}
 		verifyCert = DEFAULT_VERIFY_CERT;
-		caCert = DEFAULT_CA;
+		caCert = getDefaultCA();
 	}
 
 	public override function connect(host:sys.net.Host, port:Int):Void {
@@ -207,7 +208,7 @@ class Socket extends sys.net.Socket {
 	public override function accept():Socket {
 		var c = sys.net.Socket.socket_accept(__s);
 		if(c == null)
-			throw "Blocking";
+			throw haxe.io.Error.Blocked;
 		var cssl = new Context(conf);
 		cssl.setSocket(c);
 
@@ -252,4 +253,16 @@ class Socket extends sys.net.Socket {
 
 		return conf;
 	}
+
+	static function getDefaultCA() : Certificate {
+		if( !DEFAULT_VERIFY_CERT )
+			return null;
+		if (DEFAULT_CA == null) {
+			try {
+				DEFAULT_CA = Certificate.loadDefaults();
+			} catch (e:Dynamic) {}
+		}
+		return DEFAULT_CA;
+	}
+
 }

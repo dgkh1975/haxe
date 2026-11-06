@@ -13,19 +13,13 @@ let has_side_effect e =
 		| TField(_,fa) when PurityState.is_explicitly_impure fa -> raise Exit
 		| TNew _ | TCall _ | TBinop ((OpAssignOp _ | OpAssign),_,_) | TUnop ((Increment|Decrement),_,_) -> raise Exit
 		| TReturn _ | TBreak | TContinue | TThrow _ | TCast (_,Some _) -> raise Exit
-		| TArray _ | TEnumParameter _ | TEnumIndex _ | TCast (_,None) | TBinop _ | TUnop _ | TParenthesis _ | TMeta _ | TWhile _ | TFor _
+		| TArray _ | TEnumParameter _ | TEnumIndex _ | TCast (_,None) | TBinop _ | TUnop _ | TParenthesis _ | TMeta _ | TWhile _
 		| TField _ | TIf _ | TTry _ | TSwitch _ | TArrayDecl _ | TBlock _ | TObjectDecl _ | TVar _ -> Type.iter loop e
 	in
 	try
 		loop e; false
 	with Exit ->
 		true
-
-let rec is_exhaustive e1 = match e1.eexpr with
-	| TMeta((Meta.Exhaustive,_,_),_) -> true
-	| TMeta(_, e1) | TParenthesis e1 -> is_exhaustive e1
-	| _ -> false
-
 
 let is_read_only_field_access e fa = match fa with
 	| FEnum _ ->
@@ -49,7 +43,7 @@ let is_read_only_field_access e fa = match fa with
 
 let create_affection_checker () =
 	let modified_locals = Hashtbl.create 0 in
-	let rec might_be_affected e =
+	let might_be_affected e =
 		let rec loop e = match e.eexpr with
 			| TConst _ | TFunction _ | TTypeExpr _ -> ()
 			| TLocal v when has_var_flag v VCaptured -> raise Exit
@@ -75,7 +69,7 @@ let create_affection_checker () =
 	in
 	might_be_affected,collect_modified_locals
 
-let optimize_binop e op e1 e2 =
+let optimize_binop scom e op e1 e2 =
 	let is_float t =
 		match follow t with
 		| TAbstract({ a_path = [],"Float" },_) -> true
@@ -136,9 +130,9 @@ let optimize_binop e op e1 e2 =
 		| OpAnd -> opt Int32.logand
 		| OpOr -> opt Int32.logor
 		| OpXor -> opt Int32.logxor
-		| OpShl -> opt (fun a b -> Int32.shift_left a (Int32.to_int b))
-		| OpShr -> opt (fun a b -> Int32.shift_right a (Int32.to_int b))
-		| OpUShr -> opt (fun a b -> Int32.shift_right_logical a (Int32.to_int b))
+		| OpShl when is_numeric e.etype -> opt (fun a b -> Int32.shift_left a (Int32.to_int (Int32.logand b i32_31)))
+		| OpShr when is_numeric e.etype -> opt (fun a b -> Int32.shift_right a (Int32.to_int (Int32.logand b i32_31)))
+		| OpUShr when is_numeric e.etype -> opt (fun a b -> Int32.shift_right_logical a (Int32.to_int (Int32.logand b i32_31)))
 		| OpEq -> ebool (=)
 		| OpNotEq -> ebool (<>)
 		| OpGt -> ebool (>)
@@ -191,6 +185,7 @@ let optimize_binop e op e1 e2 =
 		in
 		(match a, b with
 		| TInt a, TFloat b | TFloat b, TInt a -> ebool (Int32.to_float a = float_of_string b)
+		| TNull, (TInt _ | TFloat _ | TBool _) | (TInt _ | TFloat _ | TBool _), TNull when scom.SafeCom.platform_config.pf_static -> e
 		| _ -> ebool (a = b))
 	| TConst (TBool a), _ ->
 		(match op with
@@ -215,7 +210,7 @@ let optimize_binop e op e1 e2 =
 		| OpAssign,_ ->
 			e
 		| _ ->
-			error "You cannot directly compare enums with arguments. Use either `switch`, `match` or `Type.enumEq`" e.epos
+			raise_typing_error "You cannot directly compare enums with arguments. Use either `switch`, `match` or `Type.enumEq`" e.epos
 		end
 	| _ ->
 		e)
@@ -226,24 +221,30 @@ let optimize_unop e op flag esub =
 		| _ -> false
 	in
 	match op, esub.eexpr with
-		| Not, (TConst (TBool f) | TParenthesis({eexpr = TConst (TBool f)})) -> { e with eexpr = TConst (TBool (not f)) }
-		| Not, (TBinop(op,e1,e2) | TParenthesis({eexpr = TBinop(op,e1,e2)})) ->
-			begin
-				let is_int = is_int e1.etype && is_int e2.etype in
-				try
-					let op = match is_int, op with
-						| true, OpGt -> OpLte
-						| true, OpGte -> OpLt
-						| true, OpLt -> OpGte
-						| true, OpLte -> OpGt
-						| _, OpEq -> OpNotEq
-						| _, OpNotEq -> OpEq
-						| _ -> raise Exit
-					in
-					{e with eexpr = TBinop(op,e1,e2)}
-				with Exit ->
-					e
-			end
+		| Not, _ ->
+			let rec transform e esub = match esub.eexpr with
+				| TConst (TBool f) -> { e with eexpr = TConst (TBool (not f)) }
+				| TBinop(op,e1,e2) ->
+					let is_int = is_int e1.etype && is_int e2.etype in
+					(try
+						let op = match is_int, op with
+							| true, OpGt -> OpLte
+							| true, OpGte -> OpLt
+							| true, OpLt -> OpGte
+							| true, OpLte -> OpGt
+							| _, OpEq -> OpNotEq
+							| _, OpNotEq -> OpEq
+							| _ -> raise Exit
+						in
+						{e with eexpr = TBinop(op,e1,e2)}
+					with Exit ->
+						e
+					)
+				| TParenthesis(e1) -> transform e e1
+				| TMeta(m, e1) -> { e with eexpr = TMeta (m, transform { e1 with eexpr = TUnop(op,flag,e1) } e1 ) }
+				| _ -> e
+			in
+			transform e esub
 		| Neg, TConst (TInt i) -> { e with eexpr = TConst (TInt (Int32.neg i)) }
 		| NegBits, TConst (TInt i) -> { e with eexpr = TConst (TInt (Int32.lognot i)) }
 		| Neg, TConst (TFloat f) ->

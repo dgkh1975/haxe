@@ -1,5 +1,8 @@
 package cases.display.issues;
 
+import TestCase;
+import haxe.Exception;
+
 class Issue8194 extends DisplayTestCase {
 	/**
 		class Main {
@@ -12,12 +15,15 @@ class Issue8194 extends DisplayTestCase {
 		}
 	**/
 	function test(_) {
-		runHaxeJson([], DisplayMethods.Completion, {
-			file: file,
-			offset: offset(1),
-			wasAutoTriggered: true
-		});
-		var result = parseCompletion();
-		Assert.equals(null, result.result);
+		try {
+			runHaxeJson([], DisplayMethods.Completion, {
+				file: file,
+				offset: offset(1),
+				wasAutoTriggered: true
+			});
+			Assert.fail();
+		} catch (e:TestException) {
+			Assert.equals("No completion point", e.message);
+		}
 	}
 }

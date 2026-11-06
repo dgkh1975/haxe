@@ -66,19 +66,25 @@ class WeakMap<K:{}, V> extends flash.utils.Dictionary implements haxe.Constraint
 	}
 
 	public function toString():String {
-		var s = "";
+		var s = "[";
 		var it = keys();
 		for (i in it) {
 			s += (s == "" ? "" : ",") + Std.string(i);
 			s += " => ";
 			s += Std.string(get(i));
 		}
-		return s + "}";
+		return s + "]";
 	}
 
 	public function clear():Void {
 		for (i in keys())
 			untyped __delete__(this, i);
+	}
+	
+	public function size():Int {
+		var s = 0;
+		for(_ in keys()) s++;
+		return s;
 	}
 }
 

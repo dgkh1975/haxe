@@ -92,6 +92,10 @@ let encode_uv_error (e:Error.t) =
 	| `ENOTTY -> 75
 	| `EFTYPE -> 76
 	| `EILSEQ -> 77
+	| `EOVERFLOW -> 78
+	| `ESOCKTNOSUPPORT -> 79
+	| `ENODATA -> 80
+	| `EUNATCH -> 81
 	)
 
 let decode_uv_error v : Error.t =
@@ -174,6 +178,10 @@ let decode_uv_error v : Error.t =
 	| 75 -> `ENOTTY
 	| 76 -> `EFTYPE
 	| 77 -> `EILSEQ
+	| 78 -> `EOVERFLOW
+	| 79 -> `ESOCKTNOSUPPORT
+	| 80 -> `ENODATA
+	| 81 -> `EUNATCH
 	| _ -> unexpected_value v "eval.luv.UVError"
 
 let luv_exception e =
@@ -542,14 +550,23 @@ let uv_error_fields = [
 		Error.set_on_unhandled_exception (fun ex ->
 			let msg =
 				match ex with
-				| HaxeError.Error (Custom msg,_) ->
+				(* TODO beware of err_sub here *)
+				| HaxeError.Error { err_message = Custom msg } ->
 					(* Eval interpreter rethrows runtime exceptions as `Custom "Exception message\nException stack"` *)
-					(try fst (ExtString.String.split msg "\n")
-					with _ -> msg)
-				| HaxeError.Error (err,_) -> HaxeError.error_msg err
+					(try fst (ExtString.String.split msg "\n") with _ -> msg)
+				| HaxeError.Error err ->
+						let messages = ref [] in
+						HaxeError.recurse_error (fun depth err ->
+							let cm = Message.make_message (get_ctx()).is_macro (HaxeError.error_msg err.err_message) err.err_pos depth MKError in
+							let ectx = MessageReporting.create_error_context false in
+							match MessageReporting.message_string ectx cm with
+								| None -> ()
+								| Some str -> messages := str :: !messages
+						) err;
+						ExtLib.String.join "\n" (List.rev !messages)
 				| _ -> Printexc.to_string ex
 			in
-			let e = create_haxe_exception ~stack:(get_ctx()).exception_stack msg in
+			let e = create_haxe_exception ~stack:((get_eval (get_ctx()))).exception_stack msg in
 			ignore(cb [e])
 		);
 		vnull
@@ -1300,7 +1317,7 @@ let process_fields = [
 					get key_environment (fun v ->
 						match decode_instance v with
 						| { ikind = IStringMap m } ->
-							StringHashtbl.fold (fun k (_,v) acc -> (k, decode_native_string v) :: acc) m []
+							RuntimeStringHashtbl.fold (fun k (_,v) acc -> (k, decode_native_string v) :: acc) m []
 						| _ ->
 							unexpected_value v "haxe.ds.Map<String,String>"
 					)
@@ -1579,9 +1596,9 @@ module F = struct
 end
 
 let file_fields = [
-	"get_stdin", VHandle (HFile File.stdin);
-	"get_stdout", VHandle (HFile File.stdout);
-	"get_stderr", VHandle (HFile File.stderr);
+	"stdin", VHandle (HFile File.stdin);
+	"stdout", VHandle (HFile File.stdout);
+	"stderr", VHandle (HFile File.stderr);
 	"createRequest", vfun0 (fun() ->
 		VHandle (HFileRequest (File.Request.make()))
 	);
@@ -1929,7 +1946,7 @@ let fs_event_fields = [
 					) events
 				in
 				encode_obj [
-					key_file,vnative_string file;
+					key_file,encode_nullable vnative_string file;
 					key_events,encode_array vevents;
 				]
 			) v4
@@ -1951,6 +1968,24 @@ let fs_event_fields = [
 	);
 ]
 
+let prepare_luv_callback v =
+	match v with
+	| VFunction _ | VFieldClosure _ ->
+		(fun () ->
+			let ctx = get_ctx() in
+			begin match Thread_local_storage.get_opt ctx.eval with
+				| Some _ ->
+					()
+				| None ->
+					let thread = EvalThread.create_thread_info ctx.next_thread_id (LuvThread (Thread.self())) in
+					let eval = EvalThread.create_eval thread in
+					Thread_local_storage.set ctx.eval eval
+			end;
+			ignore(catch_exceptions ctx (fun() -> call_value v []) null_pos)
+		)
+	| _ ->
+		raise MacroApi.Invalid_expr
+
 let thread_pool_fields = [
 	"createRequest", vfun0 (fun() ->
 		VHandle (HThreadPoolRequest (Thread_pool.Request.make()))
@@ -1962,9 +1997,7 @@ let thread_pool_fields = [
 				| VHandle (HThreadPoolRequest r) -> r
 				| v -> unexpected_value v "eval.luv.ThreadPool.ThreadPoolRequest"
 			) v2
-		and work =
-			let cb = prepare_callback v3 0 in
-			(fun() -> EvalThread.run (get_ctx()) (fun() -> cb []))
+		and work = prepare_luv_callback v3
 		and callback = encode_unit_callback v4 in
 		Thread_pool.queue_work ~loop ?request work callback;
 		vnull
@@ -1982,9 +2015,7 @@ let thread_fields = [
 		VHandle (HThread (Thread.self()))
 	);
 	"create", vfun2 (fun v1 v2 ->
-		let fn =
-			let cb = prepare_callback v1 0 in
-			(fun() -> EvalThread.run (get_ctx()) (fun() -> cb []))
+		let fn = prepare_luv_callback v1
 		and stack_size = decode_optional decode_int v2 in
 		encode_result (fun t -> VHandle (HThread t)) (Thread.create ?stack_size fn)
 	);
@@ -2141,13 +2172,17 @@ let env_fields = [
 		and value = decode_native_string v2 in
 		encode_unit_result (Env.setenv name ~value)
 	);
+	"unsetEnv", vfun1 (fun v ->
+		let name = decode_string v in
+		encode_unit_result (Env.unsetenv name)
+	);
 	"environ", vfun0 (fun() ->
 		let encode env =
 			let map =
 				List.fold_left (fun map (name,value) ->
-					StringHashtbl.add map (EvalString.create_unknown_vstring name) (vnative_string value);
+					RuntimeStringHashtbl.add map (EvalString.create_unknown_vstring name) (vnative_string value);
 					map
-				) (StringHashtbl.create()) env
+				) (RuntimeStringHashtbl.create()) env
 			in
 			encode_string_map_direct map
 		in
@@ -2158,7 +2193,7 @@ let env_fields = [
 let time_fields = [
 	"getTimeOfDay", vfun0 (fun() ->
 		encode_result (fun (t:Time.t) ->
-			encode_obj [key_sec,VInt64 t.tv_sec; key_usec,vint32 t.tv_usec]
+			encode_obj [key_sec,VInt64 t.sec; key_usec,vint32 t.usec]
 		) (Time.gettimeofday())
 	);
 	"hrTime", vfun0 (fun() ->
@@ -2275,10 +2310,10 @@ let resource_fields = [
 		encode_array_a [|vfloat m1; vfloat m5; vfloat m15|];
 	);
 	"freeMemory", vfun0 (fun() ->
-		VUInt64 (Resource.free_memory())
+		encode_nullable (fun u -> VUInt64 u) (Resource.free_memory())
 	);
 	"totalMemory", vfun0 (fun() ->
-		VUInt64 (Resource.total_memory())
+		encode_nullable (fun u -> VUInt64 u) (Resource.total_memory())
 	);
 	"constrainedMemory", vfun0 (fun() ->
 		encode_nullable (fun u -> VUInt64 u) (Resource.constrained_memory())
@@ -2372,8 +2407,8 @@ let passwd_fields = [
 		encode_result (fun (p:Passwd.t) ->
 			encode_obj_s [
 				"username",encode_string p.username;
-				"uid",vint p.uid;
-				"gid",vint p.gid;
+				"uid",vint (Unsigned.ULong.to_int p.uid);
+				"gid",vint (Unsigned.ULong.to_int p.gid);
 				"shell",encode_nullable encode_string p.shell;
 				"homedir",vnative_string p.homedir;
 			]

@@ -19,6 +19,12 @@ class InlineClass {
 	}
 }
 
+class ExternInlineClass {
+	public var a = 1;
+	public extern inline function new() {
+	}
+}
+
 class InlineIterator {
 	public var i = 0;
 	public inline function new() {};
@@ -36,6 +42,41 @@ class NestedInlineClass {
 		b = [1,2,3];
 		c = {a:4};
 	}
+}
+
+class TempAliasClass {
+	public var x : Int;
+	public var y : Int;
+
+	public inline function new( a : Int, b : Int ) {
+		this.x = a + 1;
+		this.y = b * 2;
+	}
+
+	public inline function viaThisTemp() {
+		var self = this;
+		return self.x + self.y;
+	}
+}
+
+class P {
+	public var x:Float;
+
+	public inline function new(x = 0)
+		this.x = x;
+}
+
+class PFieldInit {
+	public var x = 0;
+
+	public inline function new(x = 0)
+		this.x = x;
+}
+
+@:forward
+abstract PA(P) to P {
+	public inline function new(x)
+		this = new P(x);
 }
 
 class TestInlineConstructors extends TestBase {
@@ -121,7 +162,7 @@ class TestInlineConstructors extends TestBase {
 		return [arr[0], arr[1]];
 	}
 
-	@:js('var v_i = 0;var acc = 0;while(v_i < 10) acc += v_i++;return acc;')
+	@:js('var iter_i = 0;var acc = 0;while(iter_i < 10) acc += iter_i++;return acc;')
 	static function testIteratorMethodInliningInForLoop() {
 		var iter : Iterator<Int> = new InlineIterator();
 		var acc = 0;
@@ -129,5 +170,47 @@ class TestInlineConstructors extends TestBase {
 			acc += v;
 		}
 		return acc;
+	}
+
+	static var condition = false;
+	@:js('while(TestInlineConstructors.condition) {}try {} catch( _g ) {}return 1;')
+	static function testIgnoredValuesNotCancelling() {
+		new ExternInlineClass();
+		var a = new ExternInlineClass();
+		if ( condition ) a else a;
+		while ( condition ) a;
+		try { a; } catch(_) { a; };
+		return a.a;
+	}
+
+	@:js('return [5];')
+	static function testForwardAbstract() {
+		var p2 = {v: new PA(5)};
+		return [p2.v.x];
+	}
+
+	@:js('
+		var x = Std.random(0);
+		if(x == null) {x = 0;}
+		TestInlineConstructors.sink.x = x;
+	')
+	static function testDeadFieldInitFusion() {
+		var p = new PFieldInit(Std.random(0));
+		sink.x = p.x;
+	}
+
+	static var sink:PFieldInit = new PFieldInit();
+
+	static var seed = 1;
+
+	static inline function viaArgTemp( v : TempAliasClass ) {
+		var tmp = v;
+		return tmp.x - tmp.y;
+	}
+
+	@:js('var potentialMove_x = TestInlineConstructors.seed + 1;var potentialMove_y = TestInlineConstructors.seed * 2;return [potentialMove_x + potentialMove_y,potentialMove_x - potentialMove_y];')
+	static function testInliningTempDoesNotStealVariableName() {
+		var potentialMove = new TempAliasClass(seed, seed);
+		return [potentialMove.viaThisTemp(), viaArgTemp(potentialMove)];
 	}
 }

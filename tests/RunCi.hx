@@ -11,21 +11,26 @@ class RunCi {
 	static function main():Void {
 		Sys.putEnv("OCAMLRUNPARAM", "b");
 
-		var args = Sys.args();
-		var tests:Array<TestTarget> = switch (args.length==1 ? args[0] : Sys.getEnv("TEST")) {
+		function parseTargetArg(args:Array<String>) {
+			if (args[0] == null || args[0].startsWith("-")) {
+				return null;
+			}
+			return args.shift();
+		}
+
+		final testArgs = Sys.args();
+		final tests:Array<TestTarget> = switch (parseTargetArg(testArgs) ?? Sys.getEnv("TEST")) {
 			case null:
 				[Macro];
 			case env:
 				[for (v in env.split(",")) v.trim().toLowerCase()];
-		}
+		};
 
 		infoMsg('Going to test: $tests');
 
-		if (isCi()) {
-			changeDirectory('echoServer');
-			runCommand('haxe', ['build.hxml']);
-			changeDirectory(cwd);
-		}
+		final downloadPath = getDownloadPath();
+		if (!sys.FileSystem.exists(downloadPath))
+			sys.FileSystem.createDirectory(downloadPath);
 
 		for (test in tests) {
 			switch (systemName) {
@@ -36,14 +41,10 @@ class RunCi {
 					//pass
 			}
 
-			//run neko-based http echo server
-			var echoServer = new sys.io.Process('nekotools', ['server', '-d', 'echoServer/www/', '-p', '20200']);
-
 			infoMsg('test $test');
-			var success = true;
 			try {
 				changeDirectory(unitDir);
-				haxelibInstallGit("haxe-utest", "utest", "master");
+				haxelibInstallGit("haxe-utest", "utest");
 
 				var args = switch (ci) {
 					case null:
@@ -69,38 +70,23 @@ class RunCi {
 						runci.targets.Cpp.run(args, false, true);
 					case Js:
 						runci.targets.Js.run(args);
-					case Java:
-						runci.targets.Java.run(args);
 					case Jvm:
 						runci.targets.Jvm.run(args);
-					case Cs:
-						runci.targets.Cs.run(args);
-					case Flash9:
+					case Flash:
 						runci.targets.Flash.run(args);
 					case Hl:
-						runci.targets.Hl.run(args);
+						runci.targets.Hl.run(testArgs, args);
 					case t:
 						throw new Exception("unknown target: " + t);
 				}
-			} catch(f:Failure) {
-				success = false;
-			}
-
-			if (success) {
-				successMsg('test ${test} succeeded');
-			} else {
+			} catch(f:CommandFailure) {
 				failMsg('test ${test} failed');
-				break;
+				Sys.exit(f.exitCode);
 			}
 
-			echoServer.kill();
-			echoServer.close();
+			successMsg('test ${test} succeeded');
 		}
 
-		if (success) {
-			deploy();
-		} else {
-			Sys.exit(1);
-		}
+		deploy();
 	}
 }

@@ -96,7 +96,7 @@ class IntMap<T> implements haxe.Constraints.IMap<Int, T> {
 
 	public function toString():String {
 		var s = new StringBuf();
-		s.add("{");
+		s.add("[");
 		var it = keys();
 		for (i in it) {
 			s.add(i);
@@ -105,11 +105,15 @@ class IntMap<T> implements haxe.Constraints.IMap<Int, T> {
 			if (it.hasNext())
 				s.add(", ");
 		}
-		s.add("}");
+		s.add("]");
 		return s.toString();
 	}
 
 	public inline function clear():Void {
 		h = lua.Table.create();
+	}
+	
+	public function size():Int {
+		return lua.Syntax.code("(function() local s = 0; for _ in pairs({0}) do s = s + 1 end; return s end)()", h);
 	}
 }

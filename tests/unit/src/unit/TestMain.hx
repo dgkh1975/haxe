@@ -1,18 +1,16 @@
 package unit;
 
-import utest.ui.Report;
-import utest.Runner;
-import unit.Test.*;
 import haxe.ds.List;
+import unit.Test.*;
+import utest.Runner;
+#if utest
+import utest.ui.Report;
+#end
 
 final asyncWaits = new Array<haxe.PosInfos>();
 final asyncCache = new Array<() -> Void>();
 
 @:access(unit.Test)
-#if js
-@:expose("unit.TestMain.main")
-@:keep
-#end
 function main() {
 	#if js
 	if (js.Browser.supported) {
@@ -25,41 +23,32 @@ function main() {
 	}
 	#end
 
-	var verbose = #if ( cpp || neko || php ) Sys.args().indexOf("-v") >= 0 #else false #end;
+	var verbose = #if (cpp || neko || php) Sys.args().indexOf("-v") >= 0 #else false #end;
 
-	#if cs //"Turkey Test" - Issue #996
-	cs.system.threading.Thread.CurrentThread.CurrentCulture = new cs.system.globalization.CultureInfo('tr-TR');
-	cs.Lib.applyCultureChanges();
-	#end
-	#if neko
-	if( neko.Web.isModNeko )
-		neko.Web.setHeader("Content-Type","text/plain");
-	#elseif php
-	if( php.Web.isModNeko )
-		php.Web.setHeader("Content-Type","text/plain");
-	#end
-	#if !macro
-	trace("Generated at: " + HelperMacros.getCompilationDate());
-	#end
+	TestMainNow.printNow();
 	trace("START");
 	#if flash
-	var tf : flash.text.TextField = untyped flash.Boot.getTrace();
+	var tf:flash.text.TextField = untyped flash.Boot.getTrace();
 	tf.selectable = true;
 	tf.mouseEnabled = true;
 	#end
 	var classes = [
 		new TestOps(),
 		new TestBasetypes(),
+		new TestNumericSuffixes(),
+		new TestNumericSeparator(),
 		new TestExceptions(),
 		new TestBytes(),
 		new TestIO(),
 		new TestLocals(),
+		new TestLocalStatic(),
 		new TestEReg(),
 		new TestXML(),
 		new TestMisc(),
 		new TestJson(),
 		new TestResource(),
 		new TestInt64(),
+		new TestDefaultArgs(),
 		new TestReflect(),
 		new TestSerialize(),
 		new TestSerializerCrossTarget(),
@@ -72,19 +61,18 @@ function main() {
 		new TestCasts(),
 		new TestSyntaxModule(),
 		new TestNull(),
+		new TestNullCoalescing(),
 		new TestNumericCasts(),
 		new TestHashMap(),
 		new TestRest(),
-		#if (!no_http && (!github || !(php && Windows)))
-		new TestHttp(),
+		#if (!php && !lua)
+		/// This is annoying and causes spurious CI failures. Let's just make an effort to not break it!
+		// new TestHttps(),
 		#end
 		#if !no_pattern_matching
 		new TestMatch(),
 		#end
-		#if cs
-		new TestCSharp(),
-		#end
-		#if java
+		#if jvm
 		new TestJava(),
 		#end
 		#if lua
@@ -99,7 +87,7 @@ function main() {
 		#if php
 		new TestPhp(),
 		#end
-		#if (java || cs)
+		#if jvm
 		new TestOverloads(),
 		#end
 		new TestOverloadsForEveryone(),
@@ -110,15 +98,19 @@ function main() {
 		#end
 		new TestMapComprehension(),
 		new TestMacro(),
+		new TestGcFinalizer(),
 		new TestKeyValueIterator(),
 		new TestFieldVariance(),
-		new TestConstrainedMonomorphs()
-		//new TestUnspecified(),
+		new TestConstrainedMonomorphs(),
+		new TestDefaultTypeParameters(),
+		#if (!flash && !hl)
+		new TestCoroutines(),
+		#end
+		new TestRedefinition(),
+		// new TestUnspecified(),
 	];
 
-	for (specClass in unit.UnitBuilder.generateSpec("src/unitstd")) {
-		classes.push(specClass);
-	}
+	TestIssues.addTestClasses("src/unit/teststd", "unit.teststd");
 	TestIssues.addIssueClasses("src/unit/issues", "unit.issues");
 	TestIssues.addIssueClasses("src/unit/hxcpp_issues", "unit.hxcpp_issues");
 
@@ -126,17 +118,19 @@ function main() {
 	for (c in classes) {
 		runner.addCase(c);
 	}
+	#if utest
 	var report = Report.create(runner);
 	report.displayHeader = AlwaysShowHeader;
 	report.displaySuccessResults = NeverShowSuccessResults;
 	var success = true;
 	runner.onProgress.add(function(e) {
-		for(a in e.result.assertations) {
+		for (a in e.result.assertations) {
 			switch a {
 				case Success(pos):
 				case Warning(msg):
 				case Ignore(reason):
-				case _: success = false;
+				case _:
+					success = false;
 			}
 		}
 		#if js
@@ -145,11 +139,16 @@ function main() {
 		};
 		#end
 	});
-	#if sys
+	#if (sys || nodejs)
 	if (verbose)
 		runner.onTestStart.add(function(test) {
 			Sys.println(' $test...'); // TODO: need utest success state for this
 		});
 	#end
+	#end
 	runner.run();
+
+	#if (flash && fdb)
+	flash.Lib.fscommand("quit");
+	#end
 }

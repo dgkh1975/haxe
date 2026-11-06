@@ -20,16 +20,16 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-import python.internal.AnonObject;
-import python.internal.StringImpl;
-import python.internal.ArrayImpl;
-import python.internal.UBuiltins;
-import python.internal.MethodClosure;
-import python.lib.Inspect;
+import python.Boot.handleKeywords;
+import python.Boot;
 import python.Syntax;
 import python.VarArgs;
-import python.Boot;
-import python.Boot.handleKeywords;
+import python.internal.AnonObject;
+import python.internal.ArrayImpl;
+import python.internal.MethodClosure;
+import python.internal.StringImpl;
+import python.internal.UBuiltins;
+import python.lib.Inspect;
 
 @:access(python.Boot)
 @:coreApi
@@ -87,6 +87,8 @@ class Reflect {
 	public static function compare<T>(a:T, b:T):Int {
 		if (a == null && b == null)
 			return 0;
+		else if (haxe.Int64.isInt64(a) && haxe.Int64.isInt64(b))
+			return haxe.Int64.compare(cast a, cast b);
 		return if (a == null) 1 else if (b == null) -1 else (a == b) ? 0 : (((cast a) > (cast b)) ? 1 : -1);
 	}
 
@@ -136,8 +138,7 @@ class Reflect {
 		return o2;
 	}
 
-	@:overload(function(f:Array<Dynamic>->Void):Dynamic {})
-	public static function makeVarArgs(f:Array<Dynamic>->Dynamic):Dynamic {
+	public static function makeVarArgs<T>(f:Array<Dynamic>->T):Dynamic {
 		return function(v:VarArgs<Dynamic>) {
 			return f(v);
 		}

@@ -31,6 +31,7 @@
 						"cpp",
 						"cs",
 						"java",
+						"jvm",
 						"python",
 						"hl",
 						"eval"
@@ -61,6 +62,22 @@
 			"reserved": {
 				"type": "boolean",
 				"markdownDescription": "Reserved defines may not be defined from the command line."
+			},
+			"deprecated": {
+				"type": "string",
+				"markdownDescription": "Reason for the define to be deprecated."
+			},
+			"default": {
+				"type": "string",
+				"markdownDescription": "Default value if not explicitly set."
+			},
+			"deprecatedDefine": {
+				"type": "string",
+				"markdownDescription": "Replace and deprecate the given definition name, which can still be used in -D."
+			},
+			"signatureNeutral": {
+				"type": "boolean",
+				"markdownDescription": "Does not affect compilation signature."
 			}
 		},
 		"required": [

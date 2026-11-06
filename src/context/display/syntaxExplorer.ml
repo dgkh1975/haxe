@@ -29,7 +29,7 @@ let find_in_syntax symbols (pack,decls) =
 					()
 		) symbols
 	in
-	let rec type_path kind path =
+	let rec type_path kind { path } =
 		check KModuleType path.tname;
 		Option.may (check KModuleType) path.tsub;
 		List.iter (function
@@ -45,7 +45,7 @@ let find_in_syntax symbols (pack,decls) =
 		| CTAnonymous cffl ->
 			List.iter field cffl
 		| CTExtend(tl,cffl) ->
-			List.iter (fun (path,_) -> type_path KModuleType path) tl;
+			List.iter (fun ptp -> type_path KModuleType ptp) tl;
 			List.iter field cffl;
 		| CTIntersection tl ->
 			List.iter type_hint tl
@@ -56,7 +56,7 @@ let find_in_syntax symbols (pack,decls) =
 		begin match e with
 		| EConst(Ident s) ->
 			check KIdent s
-		| EField(e1,s) ->
+		| EField(e1,s,_) ->
 			expr e1;
 			check KAnyField s;
 		| EVars vl ->
@@ -67,8 +67,8 @@ let find_in_syntax symbols (pack,decls) =
 		| ECast(e1,tho) ->
 			expr e1;
 			Option.may type_hint tho;
-		| ENew((path,_),el) ->
-			type_path KConstructor path;
+		| ENew(ptp,el) ->
+			type_path KConstructor ptp;
 			List.iter expr el;
 		| EFunction(_,f) ->
 			func f
@@ -129,7 +129,7 @@ let find_in_syntax symbols (pack,decls) =
 		| EClass d ->
 			check KModuleType (fst d.d_name);
 			List.iter (function
-				| HExtends(path,_) | HImplements(path,_) -> type_path KModuleType path
+				| HExtends ptp | HImplements ptp -> type_path KModuleType ptp
 				| _ -> ()
 			) d.d_flags;
 			List.iter type_param d.d_params;
@@ -160,27 +160,28 @@ let find_in_syntax symbols (pack,decls) =
 	) decls
 
 let explore_uncached_modules tctx cs symbols =
+	let open CompilationCache in
 	DisplayToplevel.init_or_update_server cs tctx.com ["display";"references"];
-	let cc = CommonCache.get_cache cs tctx.com in
+	let cc = CommonCache.get_cache tctx.com in
 	let files = cc#get_files in
 	let modules = cc#get_modules in
-	let t = Timer.timer ["display";"references";"candidates"] in
-	let acc = Hashtbl.fold (fun file_key cfile acc ->
-		let module_name = CompilationServer.get_module_name_of_cfile cfile.CompilationServer.c_file_path cfile in
-		if Hashtbl.mem modules (cfile.c_package,module_name) then
-			acc
-		else try
-			find_in_syntax symbols (cfile.c_package,cfile.c_decls);
-			acc
-		with Exit ->
-			begin try
-				let m = tctx.g.do_load_module tctx (cfile.c_package,module_name) null_pos in
-				(* We have to flush immediately so we catch exceptions from weird modules *)
-				Typecore.flush_pass tctx Typecore.PFinal "final";
-				m :: acc
-			with _ ->
+	let acc = Timer.time tctx.com.timer_ctx ["display";"references";"candidates"] (fun () ->
+		Hashtbl.fold (fun file_key cfile acc ->
+			let module_name = get_module_name_of_cfile cfile.c_file_path.file cfile in
+			if Hashtbl.mem modules (cfile.c_package,module_name) then
 				acc
-			end
-	) files [] in
-	t();
+			else try
+				find_in_syntax symbols (cfile.c_package,cfile.c_decls);
+				acc
+			with Exit ->
+				begin try
+					let m = tctx.g.do_load_module tctx (cfile.c_package,module_name) null_pos in
+					(* We have to flush immediately so we catch exceptions from weird modules *)
+					Typecore.flush_pass tctx.g PFinal ("final",cfile.c_package @ [module_name]);
+					m :: acc
+				with _ ->
+					acc
+				end
+		) files []
+	) () in
 	acc

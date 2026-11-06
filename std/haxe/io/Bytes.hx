@@ -22,9 +22,8 @@
 
 package haxe.io;
 
-#if cpp
-using cpp.NativeArray;
-#end
+import haxe.Int32;
+import haxe.Int64;
 
 class Bytes {
 	public var length(default, null):Int;
@@ -47,8 +46,6 @@ class Bytes {
 		return untyped $sget(b, pos);
 		#elseif flash
 		return b[pos];
-		#elseif cpp
-		return untyped b[pos];
 		#elseif java
 		return untyped b[pos] & 0xFF;
 		#elseif python
@@ -66,11 +63,7 @@ class Bytes {
 		untyped $sset(b, pos, v);
 		#elseif flash
 		b[pos] = v;
-		#elseif cpp
-		untyped b[pos] = v;
 		#elseif java
-		b[pos] = cast v;
-		#elseif cs
 		b[pos] = cast v;
 		#elseif python
 		python.Syntax.arraySet(b, pos, v & 0xFF);
@@ -103,12 +96,8 @@ class Bytes {
 			b.writeBytes(src.b, srcpos, len);
 		#elseif java
 		java.lang.System.arraycopy(src.b, srcpos, b, pos, len);
-		#elseif cs
-		cs.system.Array.Copy(src.b, srcpos, b, pos, len);
 		#elseif python
 		python.Syntax.code("self.b[{0}:{0}+{1}] = src.b[srcpos:srcpos+{1}]", pos, len);
-		#elseif cpp
-		b.blit(pos, src.b, srcpos, len);
 		#else
 		var b1 = b;
 		var b2 = src.b;
@@ -140,8 +129,6 @@ class Bytes {
 		pos += len & ~3;
 		for (i in 0...len & 3)
 			set(pos++, value);
-		#elseif cpp
-		untyped __global__.__hxcpp_memory_memset(b, pos, len, value);
 		#else
 		for (i in 0...len)
 			set(pos++, value);
@@ -168,17 +155,13 @@ class Bytes {
 		var newarr = new java.NativeArray(len);
 		java.lang.System.arraycopy(b, pos, newarr, 0, len);
 		return new Bytes(len, newarr);
-		#elseif cs
-		var newarr = new cs.NativeArray(len);
-		cs.system.Array.Copy(b, pos, newarr, 0, len);
-		return new Bytes(len, newarr);
 		#elseif python
 		return new Bytes(len, python.Syntax.arrayAccess(b, pos, pos + len));
 		#else
 		return new Bytes(len, b.slice(pos, pos + len));
 		#end
 	}
-	
+
 	/**
 		Returns `0` if the bytes of `this` instance and the bytes of `other` are
 		identical.
@@ -220,10 +203,6 @@ class Bytes {
 		b1.endian = flash.utils.Endian.LITTLE_ENDIAN;
 		b2.endian = flash.utils.Endian.LITTLE_ENDIAN;
 		return length - other.length;
-		// #elseif cs
-		// TODO: memcmp if unsafe flag is on
-		#elseif cpp
-		return b.memcmp(other.b);
 		#else
 		var b1 = b;
 		var b2 = other.b;
@@ -240,7 +219,7 @@ class Bytes {
 		little-endian encoding). Result is unspecified if `pos` is outside the
 		bounds.
 	**/
-	#if (neko_v21 || (cpp && !cppia) || flash)
+	#if (neko_v21 || flash)
 	inline
 	#end
 	public function getDouble(pos:Int):Float {
@@ -249,10 +228,6 @@ class Bytes {
 		#elseif flash
 		b.position = pos;
 		return b.readDouble();
-		#elseif cpp
-		if (pos < 0 || pos + 8 > length)
-			throw Error.OutsideBounds;
-		return untyped __global__.__hxcpp_memory_get_double(b, pos);
 		#else
 		return FPHelper.i64ToDouble(getInt32(pos), getInt32(pos + 4));
 		#end
@@ -263,7 +238,7 @@ class Bytes {
 		little-endian encoding). Result is unspecified if `pos` is outside the
 		bounds.
 	**/
-	#if (neko_v21 || (cpp && !cppia) || flash)
+	#if (neko_v21 || flash)
 	inline
 	#end
 	public function getFloat(pos:Int):Float {
@@ -272,10 +247,6 @@ class Bytes {
 		#elseif flash
 		b.position = pos;
 		return b.readFloat();
-		#elseif cpp
-		if (pos < 0 || pos + 4 > length)
-			throw Error.OutsideBounds;
-		return untyped __global__.__hxcpp_memory_get_float(b, pos);
 		#else
 		return FPHelper.i32ToFloat(getInt32(pos));
 		#end
@@ -297,10 +268,6 @@ class Bytes {
 		#elseif flash
 		b.position = pos;
 		b.writeDouble(v);
-		#elseif cpp
-		if (pos < 0 || pos + 8 > length)
-			throw Error.OutsideBounds;
-		untyped __global__.__hxcpp_memory_set_double(b, pos, v);
 		#else
 		var i = FPHelper.doubleToI64(v);
 		setInt32(pos, i.low);
@@ -324,10 +291,6 @@ class Bytes {
 		#elseif flash
 		b.position = pos;
 		b.writeFloat(v);
-		#elseif cpp
-		if (pos < 0 || pos + 4 > length)
-			throw Error.OutsideBounds;
-		untyped __global__.__hxcpp_memory_set_float(b, pos, v);
 		#else
 		setInt32(pos, FPHelper.floatToI32(v));
 		#end
@@ -362,7 +325,7 @@ class Bytes {
 		Returns the 32-bit integer at the given position `pos` (in little-endian
 		encoding).
 	**/
-	public inline function getInt32(pos:Int):Int {
+	public inline function getInt32(pos:Int):Int32 {
 		#if neko_v21
 		return untyped $sget32(b, pos, false);
 		#elseif python
@@ -380,15 +343,15 @@ class Bytes {
 		Returns the 64-bit integer at the given position `pos` (in little-endian
 		encoding).
 	**/
-	public inline function getInt64(pos:Int):haxe.Int64 {
-		return haxe.Int64.make(getInt32(pos + 4), getInt32(pos));
+	public inline function getInt64(pos:Int):Int64 {
+		return Int64.make(getInt32(pos + 4), getInt32(pos));
 	}
 
 	/**
 		Stores the given 32-bit integer `v` at the given position `pos` (in
 		little-endian encoding).
 	**/
-	public inline function setInt32(pos:Int, v:Int):Void {
+	public inline function setInt32(pos:Int, v:Int32):Void {
 		#if neko_v21
 		untyped $sset32(b, pos, v, false);
 		#else
@@ -403,7 +366,7 @@ class Bytes {
 		Stores the given 64-bit integer `v` at the given position `pos` (in
 		little-endian encoding).
 	**/
-	public inline function setInt64(pos:Int, v:haxe.Int64):Void {
+	public inline function setInt64(pos:Int, v:Int64):Void {
 		setInt32(pos, v.low);
 		setInt32(pos + 4, v.high);
 	}
@@ -413,8 +376,6 @@ class Bytes {
 		interpreted with the given `encoding` (UTF-8 by default).
 	**/
 	public function getString(pos:Int, len:Int, ?encoding:Encoding):String {
-		if (encoding == null)
-			encoding == UTF8;
 		#if !neko
 		if (pos < 0 || len < 0 || pos + len > length)
 			throw Error.OutsideBounds;
@@ -424,17 +385,6 @@ class Bytes {
 		#elseif flash
 		b.position = pos;
 		return encoding == RawNative ? b.readMultiByte(len, "unicode") : b.readUTFBytes(len);
-		#elseif cpp
-		var result:String = "";
-		untyped __global__.__hxcpp_string_of_bytes(b, result, pos, len);
-		return result;
-		#elseif cs
-		switch (encoding) {
-			case UTF8 | null:
-				return cs.system.text.Encoding.UTF8.GetString(b, pos, len);
-			case RawNative:
-				return cs.system.text.Encoding.Unicode.GetString(b, pos, len);
-		}
 		#elseif java
 		try {
 			switch (encoding) {
@@ -505,8 +455,6 @@ class Bytes {
 		#elseif flash
 		b.position = 0;
 		return b.toString();
-		#elseif cs
-		return cs.system.text.Encoding.UTF8.GetString(b, 0, length);
 		#elseif java
 		try {
 			return new String(b, 0, length, "UTF-8");
@@ -523,14 +471,11 @@ class Bytes {
 	**/
 	public function toHex():String {
 		var s = new StringBuf();
-		var chars = [];
 		var str = "0123456789abcdef";
-		for (i in 0...str.length)
-			chars.push(str.charCodeAt(i));
 		for (i in 0...length) {
 			var c = get(i);
-			s.addChar(chars[c >> 4]);
-			s.addChar(chars[c & 15]);
+			s.addChar(StringTools.fastCodeAt(str,c >> 4));
+			s.addChar(StringTools.fastCodeAt(str,c & 15));
 		}
 		return s.toString();
 	}
@@ -553,13 +498,6 @@ class Bytes {
 		var b = new flash.utils.ByteArray();
 		b.length = length;
 		return new Bytes(length, b);
-		#elseif cpp
-		var a = new BytesData();
-		if (length > 0)
-			cpp.NativeArray.setSize(a, length);
-		return new Bytes(length, a);
-		#elseif cs
-		return new Bytes(length, new cs.NativeArray(length));
 		#elseif java
 		return new Bytes(length, new java.NativeArray(length));
 		#elseif python
@@ -587,18 +525,6 @@ class Bytes {
 		else
 			b.writeUTFBytes(s);
 		return new Bytes(b.length, b);
-		#elseif cpp
-		var a = new BytesData();
-		untyped __global__.__hxcpp_bytes_of_string(a, s);
-		return new Bytes(a.length, a);
-		#elseif cs
-		var b = switch (encoding) {
-			case UTF8 | null:
-				cs.system.text.Encoding.UTF8.GetBytes(s);
-			case RawNative:
-				cs.system.text.Encoding.Unicode.GetBytes(s);
-		};
-		return new Bytes(b.Length, b);
 		#elseif java
 		try {
 			var b:BytesData = switch (encoding) {
@@ -658,8 +584,6 @@ class Bytes {
 		return new Bytes(b.length, b);
 		#elseif neko
 		return new Bytes(untyped __dollar__ssize(b), b);
-		#elseif cs
-		return new Bytes(b.Length, b);
 		#else
 		return new Bytes(b.length, b);
 		#end
@@ -696,8 +620,6 @@ class Bytes {
 		return untyped __dollar__sget(b, pos);
 		#elseif flash
 		return b[pos];
-		#elseif cpp
-		return untyped b.unsafeGet(pos);
 		#elseif java
 		return untyped b[pos] & 0xFF;
 		#else

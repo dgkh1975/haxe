@@ -18,6 +18,7 @@ module AccessFlags = struct
 		| MAbstract
 		| MStrict
 		| MSynthetic
+		| MAnnotation
 		| MEnum
 
 	let to_int = function
@@ -34,6 +35,7 @@ module AccessFlags = struct
 		| MAbstract -> 0x400
 		| MStrict -> 0x800
 		| MSynthetic -> 0x1000
+		| MAnnotation -> 0x2000
 		| MEnum -> 0x4000
 
 	let has_flag b flag =
@@ -196,33 +198,34 @@ module JReaderHoldovers = struct
 
 	let parse_formal_type_params s = match s.[0] with
 		| '<' ->
-			let rec read_id i =
-			match s.[i] with
-			| ':' | '>' -> i
-			| _ -> read_id (i + 1)
+			let rec read_id i = match s.[i] with
+				| ':' | '>' -> i
+				| _ -> read_id (i + 1)
 			in
 			let len = String.length s in
 			let rec parse_params idx acc =
-			let idi = read_id (idx + 1) in
-			let id = String.sub s (idx + 1) (idi - idx - 1) in
-			(* next must be a : *)
-			(match s.[idi] with | ':' -> () | _ -> failwith ("Invalid formal type signature character: " ^ Char.escaped s.[idi] ^ " ; from " ^ s));
-			let ext, l = match s.[idi + 1] with
-				| ':' | '>' -> None, idi + 1
-				| _ ->
-				let sgn, l = parse_signature_part (String.sub s (idi + 1) (len - idi - 1)) in
-				Some sgn, l + idi + 1
-			in
-			let rec loop idx acc =
-				match s.[idx] with
-				| ':' ->
-				let ifacesig, ifacei = parse_signature_part (String.sub s (idx + 1) (len - idx - 1)) in
-				loop (idx + ifacei + 1) (ifacesig :: acc)
-				| _ -> acc, idx
-			in
-			let ifaces, idx = loop l [] in
-			let acc = (id, ext, ifaces) :: acc in
-			if s.[idx] = '>' then List.rev acc, idx + 1 else parse_params (idx - 1) acc
+				let idi = read_id (idx + 1) in
+				let id = String.sub s (idx + 1) (idi - idx - 1) in
+				(* next must be a : *)
+				(match s.[idi] with | ':' -> () | _ -> failwith ("Invalid formal type signature character: " ^ Char.escaped s.[idi] ^ " ; from " ^ s));
+				let ext, l = match s.[idi + 1] with
+					| ':' | '>' ->
+						None, idi + 1
+					| _ ->
+						let sgn, l = parse_signature_part (String.sub s (idi + 1) (len - idi - 1)) in
+						Some sgn, l + idi + 1
+				in
+				let rec loop idx acc =
+					match s.[idx] with
+					| ':' ->
+						let ifacesig, ifacei = parse_signature_part (String.sub s (idx + 1) (len - idx - 1)) in
+						loop (idx + ifacei + 1) (ifacesig :: acc)
+					| _ ->
+						acc, idx
+				in
+				let ifaces, idx = loop l [] in
+				let acc = (id, ext, ifaces) :: acc in
+				if s.[idx] = '>' then List.rev acc, idx + 1 else parse_params (idx - 1) acc
 			in
 			parse_params 0 []
 		| _ -> [], 0
@@ -421,7 +424,7 @@ module JReaderModern = struct
 			let len = read_i32 ch in
 			ignore(IO.nread_string ch len); (* code *)
 			let len = read_ui16 ch in
-			for i = 0 to len - 1 do
+			for _ = 0 to len - 1 do
 				ignore(IO.nread_string ch 8);
 			done; (* exceptions *)
 			let attribs = parse_attributes consts ch in
@@ -554,7 +557,7 @@ module PathConverter = struct
 	let jname_to_hx name =
 		let name =
 			if name <> "" && (String.get name 0 < 'A' || String.get name 0 > 'Z') then
-				Char.escaped (Char.uppercase (String.get name 0)) ^ String.sub name 1 (String.length name - 1)
+				Char.escaped (Char.uppercase_ascii (String.get name 0)) ^ String.sub name 1 (String.length name - 1)
 			else
 				name
 		in
@@ -614,46 +617,48 @@ type java_lib_ctx = {
 module SignatureConverter = struct
 	open PathConverter
 
-	let mk_type_path path params =
+	let mk_type_path path params p =
 		let pack,(mname,name) = jpath_to_hx path in
-		match mname with
+		let path = match mname with
 		| None ->
-			CTPath {
+			{
 				tpackage = pack;
 				tname = name;
 				tparams = params;
 				tsub = None;
 			}
 		| Some mname ->
-			CTPath {
+			{
 				tpackage = pack;
 				tname = mname;
 				tparams = params;
 				tsub = Some name;
 			}
+		in
+		make_ptp_ct path p
 
-	let ct_type_param name = CTPath {
+	let ct_type_param name = make_ptp_ct_null {
 		tpackage = [];
 		tname = name;
 		tparams = [];
 		tsub = None
 	}
 
-	let ct_void = CTPath {
+	let ct_void = make_ptp_ct_null {
 		tpackage = [];
 		tname = "Void";
 		tparams = [];
 		tsub = None;
 	}
 
-	let ct_dynamic = CTPath {
+	let ct_dynamic = make_ptp_ct_null {
 		tpackage = [];
 		tname = "Dynamic";
 		tparams = [];
 		tsub = None;
 	}
 
-	let ct_string = CTPath {
+	let ct_string = make_ptp_ct_null {
 		tpackage = [];
 		tname = "String";
 		tparams = [];
@@ -662,33 +667,33 @@ module SignatureConverter = struct
 
 	let rec convert_arg ctx p arg =
 		match arg with
-		| TAny | TType (WSuper, _) -> TPType (mk_type_path ([], "Dynamic") [],p)
+		| TAny | TType (WSuper, _) -> TPType (mk_type_path ([], "Dynamic") [] p,p)
 		| TType (_, jsig) -> TPType (convert_signature ctx p jsig,p)
 
 	and convert_signature ctx p jsig =
 		match jsig with
-		| TByte -> mk_type_path (["java"; "types"], "Int8") []
-		| TChar -> mk_type_path (["java"; "types"], "Char16") []
-		| TDouble -> mk_type_path ([], "Float") []
-		| TFloat -> mk_type_path ([], "Single") []
-		| TInt -> mk_type_path ([], "Int") []
-		| TLong -> mk_type_path (["haxe"], "Int64") []
-		| TShort -> mk_type_path (["java"; "types"], "Int16") []
-		| TBool -> mk_type_path ([], "Bool") []
-		| TObject ( (["haxe";"root"], name), args ) -> mk_type_path ([], name) (List.map (convert_arg ctx p) args)
-		| TObject ( (["java";"lang"], "Object"), [] ) -> mk_type_path ([], "Dynamic") []
-		| TObject ( (["java";"lang"], "String"), [] ) -> mk_type_path ([], "String") []
-		| TObject ( (["java";"lang"], "Enum"), [_] ) -> mk_type_path ([], "EnumValue") []
+		| TByte -> mk_type_path (["jvm"], "Int8") [] p
+		| TChar -> mk_type_path (["jvm"], "Char16") [] p
+		| TDouble -> mk_type_path ([], "Float") [] p
+		| TFloat -> mk_type_path ([], "Single") [] p
+		| TInt -> mk_type_path ([], "Int") [] p
+		| TLong -> mk_type_path (["haxe"], "Int64") [] p
+		| TShort -> mk_type_path (["jvm"], "Int16") [] p
+		| TBool -> mk_type_path ([], "Bool") [] p
+		| TObject ( (["haxe";"root"], name), args ) -> mk_type_path ([], name) (List.map (convert_arg ctx p) args) p
+		| TObject ( (["java";"lang"], "Object"), [] ) -> mk_type_path ([], "Dynamic") [] p
+		| TObject ( (["java";"lang"], "String"), [] ) -> mk_type_path ([], "String") [] p
+		| TObject ( (["java";"lang"], "Enum"), [_] ) -> mk_type_path ([], "EnumValue") [] p
 		| TObject ( path, [] ) ->
-			mk_type_path path []
-		| TObject ( path, args ) -> mk_type_path path (List.map (convert_arg ctx p) args)
+			mk_type_path path [] p
+		| TObject ( path, args ) -> mk_type_path path (List.map (convert_arg ctx p) args) p
 		| TObjectInner (pack, (name, params) :: inners) ->
 			let actual_param = match List.rev inners with
 			| (_, p) :: _ -> p
 			| _ -> die "" __LOC__ in
-			mk_type_path (pack, name ^ "$" ^ String.concat "$" (List.map fst inners)) (List.map (fun param -> convert_arg ctx p param) actual_param)
+			mk_type_path (pack, name ^ "$" ^ String.concat "$" (List.map fst inners)) (List.map (fun param -> convert_arg ctx p param) actual_param) p
 		| TObjectInner (pack, inners) -> die "" __LOC__
-		| TArray (jsig, _) -> mk_type_path (["java"], "NativeArray") [ TPType (convert_signature ctx p jsig,p) ]
+		| TArray (jsig, _) -> mk_type_path (["jvm"], "NativeArray") [ TPType (convert_signature ctx p jsig,p) ] p
 		| TMethod _ -> failwith "TMethod cannot be converted directly into Complex Type"
 		| TTypeParameter s ->
 			try
@@ -697,13 +702,34 @@ module SignatureConverter = struct
 				ct_dynamic
 end
 
-let get_type_path ct = match ct with | CTPath p -> p | _ -> die "" __LOC__
+let get_type_path ct = match ct with | CTPath ptp -> ptp | _ -> die "" __LOC__
 
 module Converter = struct
 
 	open JReaderModern
 	open PathConverter
 	open SignatureConverter
+
+	let extract_retention_policy l =
+		let rec loop2 l = match l with
+			| [] ->
+				None
+			| ann :: l ->
+				match ann.ann_type,ann.ann_elements with
+				| TObject((["java";"lang";"annotation"],"Retention"),_),[("value",ValEnum(_,name))] ->
+					Some name
+				| _ ->
+					loop2 l
+		in
+		let rec loop l = match l with
+			| [] ->
+				None
+			| AttrVisibleAnnotations l :: _ ->
+				loop2 l
+			| _ :: l ->
+				loop l
+		in
+		loop l
 
 	let convert_type_parameter ctx (name,extends,implements) p =
 		let jsigs = match extends with
@@ -720,18 +746,15 @@ module Converter = struct
 			tp_name = (name,p);
 			tp_params = [];
 			tp_meta = [];
+			tp_default = None;
 			tp_constraints = match constraints with
 				| [] -> None
-				| _ -> Some (CTIntersection constraints,p)
+				| _ -> Some (CTIntersection constraints,p);
 		} in
 		tp
 
 	let convert_enum (jc : jclass) (file : string) =
-		let p = {
-			pfile = file;
-			pmin = 0;
-			pmax = 0
-		} in
+		let p = file_pos file in
 		let meta = ref [] in
 		let add_meta m = meta := m :: !meta in
 		let data = ref [] in
@@ -758,6 +781,17 @@ module Converter = struct
 			PMap.add s (ct_type_param s) acc
 		) acc params
 
+	(**
+		`haxe.Rest<T>` auto-boxes primitive types.
+		That means we can't use it as varargs for extern methods.
+		E.g externs with `int` varargs are represented as `int[]` at run time
+		while `haxe.Rest<Int>` is actually `java.lang.Integer[]`.
+	*)
+	let is_eligible_for_haxe_rest_args arg_type =
+		match arg_type with
+		| TByte | TChar | TDouble | TFloat | TInt | TLong | TShort | TBool -> false
+		| _ -> true
+
 	let convert_field ctx is_method (jc : jclass) (is_interface : bool) (jf : jfield) p =
 		let ctx = {
 			type_params = type_param_lut ctx.type_params jf.jf_types;
@@ -778,6 +812,8 @@ module Converter = struct
 						add_access (AOverride,null_pos);
 					| _ -> ()
 				) ann
+			| AttrCode _ when is_interface ->
+				add_meta (Meta.JavaDefault,[],p)
 			| _ -> ()
 		) jf.jf_attributes;
 		let add_native_meta () =
@@ -845,9 +881,18 @@ module Converter = struct
 				begin match jf.jf_descriptor with
 				| TMethod(args,ret) ->
 					let local_names = extract_local_names() in
+					let args_count = List.length args
+					and is_varargs = AccessFlags.has_flag jf.jf_flags MVarargs in
 					let convert_arg i jsig =
 						let name = local_names (i + 1) in
-						((name,p),false,[],Some (convert_signature ctx p jsig,p),None)
+						let hx_sig =
+							match jsig with
+							| TArray (jsig1,_) when is_varargs && i + 1 = args_count && is_eligible_for_haxe_rest_args jsig1 ->
+								mk_type_path (["haxe"], "Rest") [TPType (convert_signature ctx p jsig1,p)] p
+							| _ ->
+								convert_signature ctx p jsig
+						in
+						((name,p),false,[],Some (hx_sig,p),None)
 					in
 					let f = {
 						f_params = List.map (fun tp -> convert_type_parameter ctx tp p) jf.jf_types;
@@ -871,11 +916,7 @@ module Converter = struct
 		cff
 
 	let convert_class ctx (jc : jclass) (file : string) =
-		let p = {
-			pfile = file;
-			pmin = 0;
-			pmax = 0
-		} in
+		let p = file_pos file in
 		let flags = ref [HExtern] in
 		let meta = ref [] in
 		let add_flag f = flags := f :: !flags in
@@ -884,15 +925,17 @@ module Converter = struct
 		let is_interface = AccessFlags.has_flag jc.jc_flags MInterface in
 		if is_interface then add_flag HInterface
 		else if AccessFlags.has_flag jc.jc_flags MAbstract then add_flag HAbstract;
+		let is_annotation = AccessFlags.has_flag jc.jc_flags MAnnotation in
 		begin match jc.jc_super with
 			| TObject(([],""),_)
 			| TObject((["java";"lang"],"Object"),_) ->
-				()
+				if is_annotation then
+					add_flag (HExtends (make_ptp {tpackage = ["java";"lang";"annotation"]; tname = "Annotation"; tsub = None; tparams = []} p))
 			| jsig ->
-				add_flag (HExtends (get_type_path (convert_signature ctx p jsig),p))
+				add_flag (HExtends (get_type_path (convert_signature ctx p jsig)))
 		end;
 		List.iter (fun jsig ->
-			let path = (get_type_path (convert_signature ctx p jsig),p) in
+			let path = get_type_path (convert_signature ctx p jsig) in
 			if is_interface then
 				add_flag (HExtends path)
 			else
@@ -903,6 +946,9 @@ module Converter = struct
 		let known_sigs = Hashtbl.create 0 in
 		let should_generate jf =
 			not (AccessFlags.has_flag jf.jf_flags MPrivate)
+			(* We might need member synthetics for proper call resolution, but we should never need static ones (issue #10279). *)
+			&& (not (AccessFlags.has_flag jf.jf_flags MSynthetic) || not (AccessFlags.has_flag jf.jf_flags MStatic))
+			&& jf.jf_name <> "<clinit>"
 		in
 		if jc.jc_path <> (["java";"lang"], "CharSequence") then begin
 			List.iter (fun jf ->
@@ -930,6 +976,77 @@ module Converter = struct
 		end;
 		let _,class_name = jname_to_hx (snd jc.jc_path) in
 		add_meta (Meta.Native, [EConst (String (s_type_path jc.jc_path,SDoubleQuotes) ),p],p);
+		if is_annotation then begin
+			let args = match extract_retention_policy jc.jc_attributes with
+				| None ->
+					[]
+				| Some v ->
+					[EConst (String(v,SDoubleQuotes)),p]
+			in
+			add_meta (Meta.Annotation,args,p)
+		end;
+		let has_fi_annotation = ref false in
+		List.iter (fun attr -> match attr with
+			| AttrVisibleAnnotations ann ->
+				List.iter (function
+					| { ann_type = TObject( (["java";"lang"], "FunctionalInterface"), [] ) } ->
+						has_fi_annotation := true
+					| _ -> ()
+				) ann
+			| _ ->
+				()
+		) jc.jc_attributes;
+		(* Match javac's SAM rule: an interface is functional if it declares exactly
+		   one abstract instance method (ignoring static/default/private/synthetic
+		   methods, constructors, and Object members re-declared as abstract). The
+		   @FunctionalInterface annotation is advisory in javac — Android SDK
+		   listeners are rarely annotated, so structural detection unlocks lambdas
+		   for them without per-extern opt-in. *)
+		(* JLS §9.8 excludes methods that would be members of Object from the SAM
+		   count. Match by name+arity rather than full descriptor — equals's exact
+		   param encoding can vary across class-file shapes (raw Object, generic
+		   erasure variants), and equals/hashCode/toString have unique arities on
+		   java.lang.Object so name+arity is unambiguous. *)
+		let is_object_redeclaration jf = match jf.jf_name, jf.jf_descriptor with
+			| "equals", TMethod([_],_) -> true
+			| "hashCode", TMethod([],_) -> true
+			| "toString", TMethod([],_) -> true
+			| _ -> false
+		in
+		(* Skip JDK-internal packages: sun.*, com.sun.*, jdk.internal.*. They host
+		   many single-method classes (sun.reflect.ConstructorAccessor,
+		   sun.nio.ch.Interruptible, sun.reflect.generics.tree.TypeTree, ...) that
+		   compile-time externs see but the runtime JDK may not expose — sun.* was
+		   moved to jdk.internal.* in JDK 9+ and is inaccessible to app code.
+		   Auto-tagging them as functional interfaces makes the JFI matcher emit
+		   `implements sun.reflect.ConstructorAccessor` on every matching closure,
+		   which then fails to defineClass at runtime. User code can't target these
+		   anyway, so structural detection must skip them. The @FunctionalInterface
+		   annotation path is still honored (none of the affected JDK-internal
+		   classes carry it, so this is a safe restriction). *)
+		let is_jdk_internal_package pack = match pack with
+			| "sun" :: _ -> true
+			| "com" :: "sun" :: _ -> true
+			| "jdk" :: "internal" :: _ -> true
+			| _ -> false
+		in
+		let is_structural_sam = is_interface
+			&& not (is_jdk_internal_package (fst jc.jc_path))
+			&& (
+				let count = List.fold_left (fun acc jf ->
+					if AccessFlags.has_flag jf.jf_flags MAbstract
+						&& not (AccessFlags.has_flag jf.jf_flags MStatic)
+						&& not (AccessFlags.has_flag jf.jf_flags MPrivate)
+						&& not (AccessFlags.has_flag jf.jf_flags MSynthetic)
+						&& jf.jf_name <> "<init>"
+						&& not (is_object_redeclaration jf)
+					then acc + 1 else acc
+				) 0 jc.jc_methods in
+				count = 1
+			)
+		in
+		if !has_fi_annotation || is_structural_sam then
+			add_meta (Meta.FunctionalInterface,[],p);
 		let d = {
 			d_name = (class_name,p);
 			d_doc = None;
@@ -953,45 +1070,46 @@ module Converter = struct
 		(pack,types)
 end
 
-class java_library_modern com name file_path = object(self)
+class java_library_modern com  name file_path = object(self)
 	inherit [java_lib_type,unit] native_library name file_path as super
 
 
-	val zip = lazy (Zip.open_in file_path)
+	val zip = AtomicLazy.from_fun (fun () -> Zip.open_in file_path)
 	val mutable cached_files = []
 	val modules = Hashtbl.create 0
 	val mutable loaded = false
 	val mutable closed = false
 
+	method private do_load =
+		List.iter (function
+		| ({ Zip.is_directory = false; Zip.filename = filename } as entry) when String.ends_with filename ".class" ->
+			let pack = String.nsplit filename "/" in
+			begin match List.rev pack with
+				| [] -> ()
+				| name :: pack ->
+					let name = String.sub name 0 (String.length name - 6) in
+					let pack = List.rev pack in
+					let pack,(mname,tname) = PathConverter.jpath_to_hx (pack,name) in
+					let path = PathConverter.jpath_to_path (pack,(mname,tname)) in
+					let mname = match mname with
+						| None ->
+							cached_files <- path :: cached_files;
+							tname
+						| Some mname -> mname
+					in
+					Hashtbl.add modules (pack,mname) (filename,entry);
+				end
+		| _ -> ()
+	) (Zip.entries (AtomicLazy.force zip));
+
 	method load =
 		if not loaded then begin
 			loaded <- true;
-			let close = Timer.timer ["jar";"load"] in
-			List.iter (function
-				| ({ Zip.is_directory = false; Zip.filename = filename } as entry) when String.ends_with filename ".class" ->
-					let pack = String.nsplit filename "/" in
-					begin match List.rev pack with
-						| [] -> ()
-						| name :: pack ->
-							let name = String.sub name 0 (String.length name - 6) in
-							let pack = List.rev pack in
-							let pack,(mname,tname) = PathConverter.jpath_to_hx (pack,name) in
-							let path = PathConverter.jpath_to_path (pack,(mname,tname)) in
-							let mname = match mname with
-								| None ->
-									cached_files <- path :: cached_files;
-									tname
-								| Some mname -> mname
-							in
-							Hashtbl.add modules (pack,mname) (filename,entry);
-						end
-				| _ -> ()
-			) (Zip.entries (Lazy.force zip));
-			close();
+			Timer.time com.Common.timer_ctx ["jar";"load"] (fun () -> self#do_load) ()
 		end
 
 	method private read zip (filename,entry) =
-		Std.finally (Timer.timer ["jar";"read"]) (fun () ->
+		Timer.time com.Common.timer_ctx ["jar";"read"] (fun () ->
 			let data = Zip.read_entry zip entry in
 			let jc = JReaderModern.parse_class (IO.input_string data) in
 			(jc,file_path,file_path ^ "@" ^ filename)
@@ -1003,7 +1121,7 @@ class java_library_modern com name file_path = object(self)
 	method close =
 		if not closed then begin
 			closed <- true;
-			Zip.close_in (Lazy.force zip)
+			Zip.close_in (AtomicLazy.force zip)
 		end
 
 	method list_modules : path list =
@@ -1017,9 +1135,9 @@ class java_library_modern com name file_path = object(self)
 				try
 					let entries = Hashtbl.find_all modules path in
 					if entries = [] then raise Not_found;
-					let zip = Lazy.force zip in
+					let zip = AtomicLazy.force zip in
 					let jcs = List.map (self#read zip) entries in
-					Std.finally (Timer.timer ["jar";"convert"]) (fun () ->
+					Timer.time com.Common.timer_ctx ["jar";"convert"] (fun () ->
 						Some (Converter.convert_module (fst path) jcs)
 					) ();
 				with Not_found ->
@@ -1030,3 +1148,19 @@ class java_library_modern com name file_path = object(self)
 
 	method get_data = ()
 end
+
+let add_java_lib com name std extern =
+	let file = if Sys.file_exists name then
+		name
+	else try Common.find_file com name with
+		| Not_found -> try Common.find_file com (name ^ ".jar") with
+		| Not_found ->
+			failwith ("Java lib " ^ name ^ " not found")
+	in
+	let java_lib =
+		(new java_library_modern com name file :> (java_lib_type,unit) native_library)
+	in
+	if std then java_lib#add_flag FlagIsStd;
+	if extern then java_lib#add_flag FlagIsExtern;
+	com.native_libs.java_libs <- (java_lib :> (java_lib_type,unit) native_library) :: com.native_libs.java_libs;
+	CommonCache.handle_native_lib com java_lib

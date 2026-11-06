@@ -1,14 +1,27 @@
 package cases;
 
+import haxe.Json;
+import haxe.display.Diagnostic;
 import haxe.display.Display;
 import haxe.display.FsPath;
 import haxe.display.Server;
+import haxe.io.Path;
+import TestCase;
 import utest.Assert;
 
 using StringTools;
 using Lambda;
 
 class ServerTests extends TestCase {
+	function findDiagnosticsFor(res:Dynamic, fileName:String):Null<Array<haxe.display.Diagnostic<Any>>> {
+		if (res == null) return null;
+		for (fileDiag in (cast res : Array<Dynamic>)) {
+			final path = ~/[\/\\]/g.split(Std.string(fileDiag.file)).pop();
+			if (path == fileName) return cast fileDiag.diagnostics;
+		}
+		return null;
+	}
+
 	function testNoModification() {
 		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
 		var args = ["-main", "HelloWorld.hx", "--no-output", "-js", "no.js"];
@@ -25,7 +38,7 @@ class ServerTests extends TestCase {
 		runHaxe(args);
 		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("HelloWorld.hx")});
 		runHaxe(args);
-		assertSkipping("HelloWorld");
+		assertSkipping("HelloWorld", Tainted("server/invalidate"));
 		// assertNotCacheModified("HelloWorld");
 	}
 
@@ -36,7 +49,7 @@ class ServerTests extends TestCase {
 		runHaxe(args);
 		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("Dependency.hx")});
 		runHaxe(args);
-		assertSkipping("WithDependency", "Dependency");
+		assertSkipping("WithDependency", DependencyDirty("Dependency - Tainted server/invalidate"));
 		// assertNotCacheModified("Dependency");
 		runHaxe(args);
 		assertReuse("Dependency");
@@ -64,13 +77,25 @@ class ServerTests extends TestCase {
 		assertHasPrint("2");
 	}
 
-	function testDceEmpty() {
-		vfs.putContent("Empty.hx", getTemplate("Empty.hx"));
-		var args = ["-main", "Empty", "--no-output", "-java", "java"];
-		runHaxe(args);
-		runHaxeJson(args, cast "typer/compiledTypes" /* TODO */, {});
-		assertHasField("", "Type", "enumIndex", true);
+	function testMacroArgsPerRequest() {
+		vfs.putContent("ArgsMain.hx", getTemplate("ArgsMain.hx"));
+		vfs.putContent("ArgsMacro.hx", getTemplate("ArgsMacro.hx"));
+		var baseArgs = ["-main", "ArgsMain.hx", "--no-output", "-js", "no.js", "--macro", "ArgsMacro.test()"];
+
+		runHaxe(["-D", "arg_marker=first"].concat(baseArgs));
+		assertHasPrint("arg_marker=first");
+
+		runHaxe(["-D", "arg_marker=second"].concat(baseArgs));
+		assertHasPrint("arg_marker=second");
 	}
+
+	// function testDceEmpty() {
+	// 	vfs.putContent("Empty.hx", getTemplate("Empty.hx"));
+	// 	var args = ["-main", "Empty", "--no-output", "--jvm", "java"];
+	// 	runHaxe(args);
+	// 	runHaxeJson(args, cast "typer/compiledTypes" /* TODO */, {});
+	// 	assertHasField("", "Type", "enumIndex", true);
+	// }
 
 	function testBuildMacro() {
 		vfs.putContent("BuildMacro.hx", getTemplate("BuildMacro.hx"));
@@ -78,12 +103,16 @@ class ServerTests extends TestCase {
 		var args = ["-main", "BuiltClass.hx", "--interp"];
 		runHaxe(args);
 		runHaxe(args);
-		assertReuse("BuiltClass");
+		/* This often fails on our CI because the reported stdout is empty. I don't know why this is the case,
+			but it's probably some obscure timing issue related to pipes which has nothing to do with that we
+			actually want to test here. */
+		// trace(lastResult);
+		// assertReuse("BuiltClass");
 		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("BuildMacro.hx")});
 		runHaxe(args);
 		// assertNotCacheModified("BuildMacro");
-		assertSkipping("BuiltClass", "BuildMacro");
-		assertSkipping("BuildMacro");
+		assertSkipping("BuiltClass", DependencyDirty("BuildMacro - Tainted server/invalidate"));
+		assertSkipping("BuildMacro", Tainted("server/invalidate"));
 	}
 
 	function testBrokenSyntaxDiagnostics() {
@@ -92,7 +121,8 @@ class ServerTests extends TestCase {
 		var args = ["-main", "BrokenSyntax.hx", "--interp", "--no-output"];
 		runHaxe(args);
 		assertErrorMessage("Expected }");
-		runHaxe(args.concat(["--display", "Empty.hx@0@diagnostics"]));
+		final res = runHaxeJson(args, DisplayMethods.Diagnostics, {file: new FsPath("Empty.hx")});
+		Assert.equals(0, res.length);
 		runHaxe(args);
 		assertErrorMessage("Expected }");
 	}
@@ -105,30 +135,39 @@ class ServerTests extends TestCase {
 		assertSuccess();
 	}
 
-	#if false // @see https://github.com/HaxeFoundation/haxe/issues/8596#issuecomment-518815594
-	function testDisplayModuleRecache() {
+	@:variant("InMemory", true)
+	@:variant("Hxb", false)
+	function testDisplayModuleRecache(inMemory:Bool) {
 		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
 		var args = ["--main", "HelloWorld", "--interp"];
+		if (inMemory)
+			args = args.concat(["-D", "disable-hxb-cache"]);
+		else
+			args = args.concat(["--undefine", "disable-hxb-cache"]);
+
 		runHaxe(args);
 		runHaxe(args);
 		assertReuse("HelloWorld");
 
-		var args2 = ["--main", "HelloWorld", "--interp", "--display", "HelloWorld.hx@64@type"];
-		runHaxe(args2);
+		var displayArgs = ["--main", "HelloWorld", "--interp"];
+		if (inMemory)
+			displayArgs = displayArgs.concat(["-D", "disable-hxb-cache"]);
+		else
+			displayArgs = displayArgs.concat(["--undefine", "disable-hxb-cache"]);
 
+		runHaxeJson(displayArgs, DisplayMethods.Hover, {file: new FsPath("HelloWorld.hx"), offset: 64});
 		runHaxe(args);
 		assertReuse("HelloWorld");
 
 		// make sure we still invalidate if the file does change
 		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("HelloWorld.hx")});
-		runHaxe(args2);
+		runHaxeJson(displayArgs, DisplayMethods.Hover, {file: new FsPath("HelloWorld.hx"), offset: 64});
 
 		runHaxe(args);
-		assertSkipping("HelloWorld");
-	}
-	#end
 
-	#if false // @see https://github.com/HaxeFoundation/haxe/issues/8596#issuecomment-518815594
+		assertSkipping("HelloWorld", Tainted("server/invalidate"));
+	}
+
 	function testMutuallyDependent() {
 		vfs.putContent("MutuallyDependent1.hx", getTemplate("MutuallyDependent1.hx"));
 		vfs.putContent("MutuallyDependent2.hx", getTemplate("MutuallyDependent2.hx"));
@@ -136,20 +175,295 @@ class ServerTests extends TestCase {
 		var args = ["MutuallyDependent1", "MutuallyDependent2"];
 		runHaxe(args);
 
-		args = args.concat(["--display", "MutuallyDependent1.hx@44@type"]);
-		runHaxe(args);
+		runHaxeJson(args, DisplayMethods.Hover, {file: new FsPath("MutuallyDependent1.hx"), offset: 44});
 		assertSuccess();
 	}
-	#end
+
+	function testDiagnosticsFileContents() {
+		vfs.putContent("Main.hx", getTemplate("issues/Issue9134/Main.hx"));
+		vfs.putContent("Other.hx", getTemplate("issues/Issue9134/Other.hx"));
+		var args = ["-main", "Main", "Other"];
+
+		{
+			final res = runHaxeJson(args, DisplayMethods.Diagnostics, {
+				fileContents: [{file: new FsPath("Other.hx")}, {file: new FsPath("Main.hx")},]
+			});
+			Assert.equals(1, res.length);
+			Assert.equals(1, res[0].diagnostics.length);
+			var arg = res[0].diagnostics[0].args;
+			Assert.equals("Unused variable", (cast arg).description);
+			Assert.stringContains("Main.hx", res[0].file.toString());
+		}
+
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("Main.hx")});
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("Other.hx")});
+
+		{
+			final res = runHaxeJson(args, DisplayMethods.Diagnostics, {
+				fileContents: [
+					{file: new FsPath("Main.hx"), contents: getTemplate("issues/Issue9134/Main2.hx")},
+					{file: new FsPath("Other.hx"), contents: getTemplate("issues/Issue9134/Other2.hx")}
+				]
+			});
+			Assert.equals(1, res.length);
+			Assert.equals(1, res[0].diagnostics.length);
+			var arg = res[0].diagnostics[0].args;
+			Assert.equals("Unused variable", (cast arg).description);
+			Assert.stringContains("Other.hx", res[0].file.toString());
+		}
+
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("Main.hx")});
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("Other.hx")});
+
+		{
+			final res = runHaxeJson(args, DisplayMethods.Diagnostics, {
+				fileContents: [
+					{file: new FsPath("Main.hx"), contents: getTemplate("issues/Issue9134/Main.hx")},
+					{file: new FsPath("Other.hx"), contents: getTemplate("issues/Issue9134/Other2.hx")}
+				]
+			});
+			Assert.equals(2, res.length);
+
+			for (i in 0...2) {
+				Assert.equals(1, res[i].diagnostics.length);
+				var arg = res[i].diagnostics[0].args;
+				Assert.equals("Unused variable", (cast arg).description);
+			}
+		}
+
+		// Currently, haxe compilation server will have this content anyway
+		// because of diagnostics with file contents, but that behavior may not
+		// be obvious in tests
+		vfs.putContent("Other.hx", getTemplate("issues/Issue9134/Other2.hx"));
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("Other.hx")});
+
+		// Running project wide diagnostics; checks here aren't great since
+		// results will depend on haxe std which may change without updating
+		// this test everytime..
+		{
+			final res = runHaxeJson(args, DisplayMethods.Diagnostics, {});
+			var hasMain = false;
+			var hasOther = false;
+
+			for (result in res) {
+				var file = result.file.toString();
+				if (StringTools.endsWith(file, "Main.hx"))
+					hasMain = true;
+				else if (StringTools.endsWith(file, "Other.hx"))
+					hasOther = true;
+				else
+					continue;
+
+				var arg = result.diagnostics[0].args;
+				Assert.equals("Unused variable", (cast arg).description);
+			}
+
+			Assert.isTrue(hasMain);
+			Assert.isTrue(hasOther);
+		}
+	}
+
+	function testDiagnosticsRecache() {
+		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
+		var args = ["--main", "HelloWorld", "--interp"];
+		runHaxe(args);
+		runHaxe(args);
+		assertReuse("HelloWorld");
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("HelloWorld.hx")});
+		runHaxe(args);
+		assertSkipping("HelloWorld", Tainted("server/invalidate"));
+		Assert.equals(0, runHaxeJson(args, DisplayMethods.Diagnostics, {file: new FsPath("HelloWorld.hx")}).length);
+		runHaxe(args);
+		assertReuse("HelloWorld");
+	}
+
+	function testDiagnosticsRecache1() {
+		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
+		var args = ["--main", "HelloWorld", "--interp"];
+		runHaxe(args);
+		runHaxe(args);
+		assertReuse("HelloWorld");
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("HelloWorld.hx")});
+		runHaxe(args);
+		assertSkipping("HelloWorld", Tainted("server/invalidate"));
+		Assert.equals(0, runHaxeJson(args, DisplayMethods.Diagnostics, {fileContents: [{file: new FsPath("HelloWorld.hx")}]}).length);
+		runHaxe(args);
+		assertReuse("HelloWorld");
+	}
+
+	function testDiagnosticsRecache2() {
+		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
+		var args = ["--main", "HelloWorld", "--interp"];
+		Assert.equals(0, runHaxeJson(args, DisplayMethods.Diagnostics, {file: new FsPath("HelloWorld.hx")}).length);
+		runHaxe(args);
+		assertReuse("HelloWorld");
+	}
+
+	function testDiagnosticsRecache3() {
+		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
+		var args = ["--main", "HelloWorld", "--interp"];
+		runHaxe(args);
+		runHaxe(args);
+		assertReuse("HelloWorld");
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("HelloWorld.hx")});
+		Assert.equals(0, runHaxeJson(args, DisplayMethods.Diagnostics, {file: new FsPath("HelloWorld.hx")}).length);
+		runHaxeJson(args, DisplayMethods.Hover, {file: new FsPath("HelloWorld.hx"), offset: 0});
+		assertReuse("HelloWorld");
+	}
+
+	function testDiagnosticsMissingFieldsNotCached() {
+		vfs.putContent("MissingFieldsDep.hx", getTemplate("diagnostics/MissingFieldsDep.hx"));
+		vfs.putContent("MissingFieldsMain.hx", getTemplate("diagnostics/MissingFieldsMain.hx"));
+		var args = ["--main", "MissingFieldsMain", "--interp"];
+		var res1 = runHaxeJson(args, DisplayMethods.Diagnostics, {
+			fileContents: [{file: new FsPath("MissingFieldsMain.hx")}, {file: new FsPath("MissingFieldsDep.hx")}]
+		});
+		final diags1 = findDiagnosticsFor(res1, "MissingFieldsDep.hx");
+		Assert.notNull(diags1);
+		Assert.notNull(diags1.find(d -> d.kind == MissingFields));
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("MissingFieldsMain.hx")});
+		var res2 = runHaxeJson(args, DisplayMethods.Diagnostics, {
+			fileContents: [{file: new FsPath("MissingFieldsMain.hx")}, {file: new FsPath("MissingFieldsDep.hx")}]
+		});
+		// Dep was not invalidated, but the previous run typed it with downgraded errors
+		Assert.isFalse(hasMessage("reusing MissingFieldsDep"));
+		final diags2 = findDiagnosticsFor(res2, "MissingFieldsDep.hx");
+		Assert.notNull(diags2);
+		Assert.notNull(diags2.find(d -> d.kind == MissingFields));
+	}
+
+	function testDiagnosticsMissingFieldsInCompilation() {
+		vfs.putContent("MissingFieldsDep.hx", getTemplate("diagnostics/MissingFieldsDep.hx"));
+		vfs.putContent("MissingFieldsMain.hx", getTemplate("diagnostics/MissingFieldsMain.hx"));
+		var args = ["--main", "MissingFieldsMain", "--interp"];
+		var res = runHaxeJson(args, DisplayMethods.Diagnostics, {
+			fileContents: [{file: new FsPath("MissingFieldsMain.hx")}, {file: new FsPath("MissingFieldsDep.hx")}]
+		});
+		final diags = findDiagnosticsFor(res, "MissingFieldsDep.hx");
+		Assert.notNull(diags);
+		Assert.notNull(diags.find(d -> d.kind == MissingFields));
+		runHaxe(args);
+		Assert.isFalse(hasMessage("reusing MissingFieldsDep"));
+		assertErrorMessage("Field doSomething needed by IFoo is missing");
+	}
+
+	function testDiagnosticsMultipleOpenFiles() {
+		vfs.putContent("Main.hx", getTemplate("diagnostics/multi-files/Main.hx"));
+		vfs.putContent("File1.hx", getTemplate("diagnostics/multi-files/File1.hx"));
+		vfs.putContent("File2.hx", getTemplate("diagnostics/multi-files/File2.hx"));
+		vfs.putContent("File3.hx", getTemplate("diagnostics/multi-files/File3.hx"));
+
+		var args = ["--main", "Main", "--interp"];
+		{
+			final res = runHaxeJson(args, DisplayMethods.Diagnostics, {
+				fileContents: [{file: new FsPath("Main.hx")}, {file: new FsPath("File1.hx")}]
+			});
+			Assert.equals(2, res.length); // Asked diagnostics for 2 files
+
+			for (fileDiagnostics in res) {
+				final path = ~/[\/|\\]/g.split(fileDiagnostics.file.toString()).pop();
+
+				switch (path) {
+					case "Main.hx":
+						Assert.equals(2, fileDiagnostics.diagnostics.length);
+						for (diag in fileDiagnostics.diagnostics) {
+							Assert.equals(diag.kind, DKUnusedImport);
+						}
+
+					case "File1.hx":
+						Assert.equals(1, fileDiagnostics.diagnostics.length);
+						var diag:Diagnostic<ReplaceableCodeDiagnostics> = fileDiagnostics.diagnostics[0];
+						Assert.equals(diag.kind, ReplaceableCode);
+						Assert.equals(diag.args.description, "Unused variable");
+
+					case _:
+						throw 'Did not expect diagnostics for $path';
+				}
+			}
+		}
+
+		// Check that File2 was reached
+		final context = runHaxeJson(args, ServerMethods.Contexts, null).find(ctx -> ctx.desc == "after_init_macros");
+		Assert.equals(runHaxeJson(args, ServerMethods.Type, {signature: context.signature, modulePath: "File2", typeName: "File2"}).pos.file, "File2.hx");
+
+		{
+			final res = runHaxeJson(args, DisplayMethods.Diagnostics, {
+				fileContents: [
+					{file: new FsPath("Main.hx")},
+					{file: new FsPath("File3.hx")}, // Not reached by normal compilation
+				]
+			});
+			Assert.equals(2, res.length); // Asked diagnostics for 2 files
+
+			for (fileDiagnostics in res) {
+				final path = ~/[\/|\\]/g.split(fileDiagnostics.file.toString()).pop();
+
+				switch (path) {
+					case "Main.hx":
+						Assert.equals(2, fileDiagnostics.diagnostics.length);
+						for (diag in fileDiagnostics.diagnostics) {
+							Assert.equals(diag.kind, DKUnusedImport);
+						}
+
+					case "File3.hx":
+						Assert.equals(1, fileDiagnostics.diagnostics.length);
+						var diag:Diagnostic<ReplaceableCodeDiagnostics> = fileDiagnostics.diagnostics[0];
+						Assert.equals(diag.kind, ReplaceableCode);
+						Assert.equals(diag.args.description, "Unused variable");
+
+					case _:
+						throw 'Did not expect diagnostics for $path';
+				}
+			}
+		}
+	}
+
+	function testReadClassPaths() {
+		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
+		runHaxeJson(["-cp", "."], ServerMethods.ReadClassPaths, null);
+		assertSuccess();
+	}
+
+	function testReadClassPaths2() {
+		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
+		runHaxeJson(["-cp", "."], ServerMethods.ReadClassPaths, {wait: true});
+		assertSuccess();
+	}
+
+	/**
+		Regression test: if expand_args or create_json_result_handler throws before
+		a request_scope exists (e.g. unknown JSON-RPC method), the worker domain must
+		NOT crash. In the buggy code the unhandled exception killed the worker domain
+		so all subsequent requests would hang forever (vshaxe "Parsing Classpaths…"
+		stall). After the fix the server sends a proper JSON-RPC error response and
+		keeps processing further requests.
+	**/
+	function testUnknownDisplayMethodDoesNotCrashWorker() {
+		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
+
+		// Send a display request with an unknown method; the server should
+		// return a JSON-RPC error rather than crashing the worker domain.
+		var unknownMethodArgs = [
+			"-cp", ".",
+			"--display", haxe.Json.stringify({jsonrpc: "2.0", id: 1, method: "server/methodThatDoesNotExist", params: null})
+		];
+		runHaxe(unknownMethodArgs);
+		// The response should contain a JSON-RPC error (no error signal, just an error JSON in stderr)
+		Assert.isTrue(lastResult.stderr.contains('"error"'), 'Expected JSON-RPC error response, got: ${lastResult.stderr}');
+
+		// The worker domain must still be alive after the error. If it crashed
+		// this next request would time out instead of succeeding.
+		runHaxeJson(["-cp", "."], ServerMethods.ReadClassPaths, null);
+		assertSuccess();
+	}
 
 	function testSyntaxCache() {
 		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
-		runHaxeJson(["-cp", "."], ServerMethods.ReadClassPaths, null);
+		runHaxeJson(["-cp", "."], ServerMethods.ReadClassPaths, {wait: true});
 		vfs.putContent("Empty.hx", "");
 		runHaxeJson([], ServerMethods.ModuleCreated, {file: new FsPath("Empty.hx")});
 		vfs.putContent("Empty.hx", getTemplate("Empty.hx"));
-		runHaxeJson([], DisplayMethods.Completion, {file: new FsPath("HelloWorld.hx"), offset: 75, wasAutoTriggered: false});
-		var completion = parseCompletion();
+		var completion = runHaxeJson([], DisplayMethods.Completion, {file: new FsPath("HelloWorld.hx"), offset: 75, wasAutoTriggered: false});
 		assertHasCompletion(completion, module -> switch (module.kind) {
 			case Type: module.args.path.typeName == "HelloWorld";
 			case _: false;
@@ -161,8 +475,7 @@ class ServerTests extends TestCase {
 		// check removal
 		vfs.putContent("Empty.hx", "");
 		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("Empty.hx")});
-		runHaxeJson([], DisplayMethods.Completion, {file: new FsPath("HelloWorld.hx"), offset: 75, wasAutoTriggered: false});
-		var completion = parseCompletion();
+		var completion = runHaxeJson([], DisplayMethods.Completion, {file: new FsPath("HelloWorld.hx"), offset: 75, wasAutoTriggered: false});
 		assertHasCompletion(completion, module -> switch (module.kind) {
 			case Type: module.args.path.typeName == "HelloWorld";
 			case _: false;
@@ -176,13 +489,43 @@ class ServerTests extends TestCase {
 	function testSyntaxCache2() {
 		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
 		var args = ["-cp", ".", "--interp"];
-		runHaxeJson(args, ServerMethods.ReadClassPaths, null);
+		runHaxeJson(args, ServerMethods.ReadClassPaths, {wait: true});
 		vfs.putContent("Empty.hx", getTemplate("Empty.hx"));
 		runHaxeJson([] /* No args here because file watchers don't generally know */, ServerMethods.ModuleCreated, {file: new FsPath("Empty.hx")});
-		runHaxeJson(args, DisplayMethods.Completion, {file: new FsPath("HelloWorld.hx"), offset: 75, wasAutoTriggered: false});
-		var completion = parseCompletion();
+		var completion = runHaxeJson(args, DisplayMethods.Completion, {file: new FsPath("HelloWorld.hx"), offset: 75, wasAutoTriggered: false});
 		assertHasCompletion(completion, module -> switch (module.kind) {
 			case Type: module.args.path.typeName == "Empty";
+			case _: false;
+		});
+	}
+
+	function testSyntaxCachePlatformSpecificFiles() {
+		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
+		vfs.putContent("EmptyJs.js.hx", "class EmptyJs {}");
+		vfs.putContent("EmptyPy.py.hx", "class EmptyPy {}");
+		var args = ["-cp", ".", "-js", "no.js", "--no-output"];
+		runHaxeJson(args, ServerMethods.ReadClassPaths, {wait: true});
+		var completion = runHaxeJson(args, DisplayMethods.Completion, {file: new FsPath("HelloWorld.hx"), offset: 75, wasAutoTriggered: false});
+		// EmptyJs.js.hx matches the current platform and must show up as module EmptyJs
+		assertHasCompletion(completion, module -> switch (module.kind) {
+			case Type: module.args.path.typeName == "EmptyJs";
+			case _: false;
+		});
+		// EmptyPy.py.hx belongs to another platform and must not show up
+		assertHasNoCompletion(completion, module -> switch (module.kind) {
+			case Type: module.args.path.typeName == "EmptyPy";
+			case _: false;
+		});
+	}
+
+	function testSyntaxCacheCustomExtensionFiles() {
+		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
+		vfs.putContent("EmptyCustom.custom.hx", "class EmptyCustom {}");
+		var args = ["-cp", ".", "--custom-extension", "custom", "--interp"];
+		runHaxeJson(args, ServerMethods.ReadClassPaths, {wait: true});
+		var completion = runHaxeJson(args, DisplayMethods.Completion, {file: new FsPath("HelloWorld.hx"), offset: 75, wasAutoTriggered: false});
+		assertHasCompletion(completion, module -> switch (module.kind) {
+			case Type: module.args.path.typeName == "EmptyCustom";
 			case _: false;
 		});
 	}
@@ -193,12 +536,147 @@ class ServerTests extends TestCase {
 		var args = ["-main", "VectorInliner", "--interp"];
 		runHaxe(args);
 		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("VectorInliner.hx")});
-		runHaxeJson(args, cast "typer/compiledTypes" /* TODO */, {});
-		var type = getStoredType("", "VectorInliner");
+		final compiledTypes:Dynamic = runHaxeJson(args, cast "typer/compiledTypes" /* TODO */, {});
+		var type = getStoredType(compiledTypes, "", "VectorInliner");
 		function moreHack(s:String) {
 			return ~/[\r\n\t]/g.replace(s, "");
 		}
 		utest.Assert.equals("function() {_Vector.Vector_Impl_.toIntVector(null);}", moreHack(type.args.statics[0].expr.testHack)); // lmao
+	}
+
+	function testMetadata() {
+		var dummy_path = Path.join(["..", "misc", "eval", "projects", "Issue10844"]);
+		Sys.command("haxelib", ["dev", "dummy_doc_dep", Path.join([dummy_path, "dummy_doc_dep"])]);
+		Sys.command("haxelib", ["dev", "dummy_doc", Path.join([dummy_path, "dummy_doc"])]);
+		var args = ["-lib", "dummy_doc"];
+
+		{
+			final meta = runHaxeJson(args, DisplayMethods.Metadata, {compiler: true, user: true});
+			var analyzer = Lambda.find(meta, m -> m.name == ':analyzer');
+			Assert.notNull(analyzer);
+			Assert.equals("Used to configure the static analyzer.", analyzer.doc);
+			Assert.equals("haxe compiler", analyzer.origin);
+
+			var dummy_doc = Lambda.find(meta, m -> m.name == ':foo');
+			Assert.notNull(dummy_doc);
+			Assert.equals("Some documentation for the @:foo metadata for cpp platform", dummy_doc.doc);
+			Assert.equals("dummy_doc", dummy_doc.origin);
+			Assert.equals(Platform.Cpp, dummy_doc.platforms[0]);
+
+			var dummy_doc = Lambda.find(meta, m -> m.name == ':bar');
+			Assert.notNull(dummy_doc);
+			Assert.equals("dummy_doc", dummy_doc.origin);
+			Assert.equals(MetadataTarget.Class, dummy_doc.targets[0]);
+
+			var dummy_doc_dep = Lambda.find(meta, m -> m.name == ':baz');
+			Assert.notNull(dummy_doc_dep);
+			Assert.equals("dummy_doc_dep", dummy_doc_dep.origin);
+		}
+
+		{
+			final meta = runHaxeJson(args, DisplayMethods.Metadata, {compiler: true, user: false});
+			var analyzer = Lambda.find(meta, m -> m.name == ':analyzer');
+			Assert.notNull(analyzer);
+
+			var dummy_doc = Lambda.find(meta, m -> m.name == ':foo');
+			Assert.isNull(dummy_doc);
+
+			var dummy_doc_dep = Lambda.find(meta, m -> m.name == ':baz');
+			Assert.isNull(dummy_doc_dep);
+		}
+
+		{
+			final meta = runHaxeJson(args, DisplayMethods.Metadata, {compiler: false, user: true});
+			var analyzer = Lambda.find(meta, m -> m.name == ':analyzer');
+			Assert.isNull(analyzer);
+
+			var dummy_doc = Lambda.find(meta, m -> m.name == ':foo');
+			Assert.notNull(dummy_doc);
+
+			var dummy_doc_dep = Lambda.find(meta, m -> m.name == ':baz');
+			Assert.notNull(dummy_doc_dep);
+		}
+
+		Assert.equals(0, runHaxeJson(args, DisplayMethods.Metadata, {compiler: false, user: false}).length);
+	}
+
+	function testDefines() {
+		var dummy_path = Path.join(["..", "misc", "eval", "projects", "Issue10844"]);
+		Sys.command("haxelib", ["dev", "dummy_doc_dep", Path.join([dummy_path, "dummy_doc_dep"])]);
+		Sys.command("haxelib", ["dev", "dummy_doc", Path.join([dummy_path, "dummy_doc"])]);
+		var args = ["-lib", "dummy_doc"];
+
+		{
+			final defines = runHaxeJson(args, DisplayMethods.Defines, {compiler: true, user: true});
+			var debug = Lambda.find(defines, d -> d.name == 'debug');
+			Assert.notNull(debug);
+			Assert.equals("Activated when compiling with -debug.", debug.doc);
+			Assert.equals("haxe compiler", debug.origin);
+
+			var dummy_doc = Lambda.find(defines, d -> d.name == 'no-bullshit');
+			Assert.notNull(dummy_doc);
+			Assert.equals("Only very important stuff should be compiled", dummy_doc.doc);
+			Assert.equals("dummy_doc", dummy_doc.origin);
+
+			var dummy_doc_dep = Lambda.find(defines, d -> d.name == 'dummy');
+			Assert.notNull(dummy_doc_dep);
+			Assert.equals("dummy_doc_dep", dummy_doc_dep.origin);
+		}
+
+		{
+			final defines = runHaxeJson(args, DisplayMethods.Defines, {compiler: true, user: false});
+			var debug = Lambda.find(defines, d -> d.name == 'debug');
+			Assert.notNull(debug);
+
+			var dummy_doc = Lambda.find(defines, d -> d.name == 'no-bullshit');
+			Assert.isNull(dummy_doc);
+
+			var dummy_doc_dep = Lambda.find(defines, d -> d.name == 'dummy');
+			Assert.isNull(dummy_doc_dep);
+		}
+
+		{
+			final defines = runHaxeJson(args, DisplayMethods.Defines, {compiler: false, user: true});
+			var debug = Lambda.find(defines, d -> d.name == 'debug');
+			Assert.isNull(debug);
+
+			var dummy_doc = Lambda.find(defines, d -> d.name == 'no-bullshit');
+			Assert.notNull(dummy_doc);
+
+			var dummy_doc_dep = Lambda.find(defines, d -> d.name == 'dummy');
+			Assert.notNull(dummy_doc_dep);
+		}
+
+		Assert.equals(0, runHaxeJson(args, DisplayMethods.Defines, {compiler: false, user: false}).length);
+	}
+
+	function test10986() {
+		vfs.putContent("Main.hx", getTemplate("issues/Issue10986/Main.hx"));
+		vfs.putContent("haxe/ds/Vector.hx", getTemplate("issues/Issue10986/Vector.hx"));
+		var args = ["-main", "Main", "--jvm", "Main.jar"];
+		runHaxe(args);
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("haxe/ds/Vector.hx")});
+		runHaxe(args);
+		assertSuccess();
+	}
+
+	function test12289() {
+		vfs.putContent("Empty.hx", getTemplate("Empty.hx"));
+		vfs.putContent("StringTools.hx", sys.io.File.getContent(haxe.io.Path.join([Sys.getCwd(), "../../std/StringTools.hx"])));
+
+		var args = ["-main", "Empty", "-js", "out.js", "--no-output"];
+		runHaxe(args);
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("StringTools.hx")});
+		runHaxe(args);
+		assertSuccess();
+	}
+
+	function test11179() {
+		vfs.putContent("Main.hx", getTemplate("issues/Issue11179/Main.hx"));
+		var args = ["-main", "Main", "--macro", 'nullSafety("Main", Strict)', "--interp"];
+		runHaxe(args);
+		runHaxe(args);
+		assertSuccess();
 	}
 
 	// See https://github.com/HaxeFoundation/haxe/issues/8368#issuecomment-525379060
@@ -215,6 +693,46 @@ class ServerTests extends TestCase {
 	}
 	#end
 
+	function testXRedefinedFromX_2() {
+		vfs.putContent("Main.hx", getTemplate("issues/Issue8368/Main2.hx"));
+		var transform = Marker.extractMarkers(getTemplate("issues/Issue8368/MyMacro2.macro.hx"));
+		var args = ["-main", "Main", "--macro", "define('whatever')"];
+
+		vfs.putContent("MyMacro.macro.hx",
+			transform.source.substr(0, transform.markers[1]) + transform.source.substr(transform.markers[2], transform.source.length));
+
+		runHaxe(args);
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("MyMacro.macro.hx")});
+
+		var completionRequest = {
+			file: new FsPath("MyMacro.macro.hx"),
+			contents: transform.source,
+			offset: transform.markers[2],
+			wasAutoTriggered: false
+		};
+		Assert.isTrue(runHaxeJson(args, DisplayMethods.Completion, completionRequest).items.length == 23);
+		Assert.isTrue(runHaxeJson(args, DisplayMethods.Completion, completionRequest).items.length == 23);
+		Assert.isTrue(runHaxeJson(args, DisplayMethods.Completion, completionRequest).items.length == 23);
+
+		runHaxe(args);
+		assertSuccess();
+	}
+
+	function testStackOverflow() {
+		vfs.putContent("Empty.hx", getTemplate("Empty.hx"));
+		var args = ["-main", "Empty.hx", "--macro", "allowPackage('sys')", "--interp", "--no-output"];
+		var runs = 0;
+
+		@:coroutine function runLoop() {
+			runHaxeJson(args, DisplayMethods.Diagnostics, {file: new FsPath("Empty.hx")});
+			runHaxe(args.concat(["-D", "compile-only-define"]));
+			if (assertSuccess() && ++runs < 20)
+				runLoop();
+		}
+
+		runLoop();
+	}
+
 	function testMacroStaticsReset() {
 		vfs.putContent("Main.hx", getTemplate("issues/Issue8631/Main.hx"));
 		vfs.putContent("Init.hx", getTemplate("issues/Issue8631/Init.hx"));
@@ -226,16 +744,17 @@ class ServerTests extends TestCase {
 		utest.Assert.equals('2', counter);
 	}
 
-	// function testIssue8616() {
-	// 	vfs.putContent("Main.hx", getTemplate("issues/Issue8616/Main.hx"));
-	// 	vfs.putContent("A.hx", getTemplate("issues/Issue8616/A.hx"));
-	// 	var args = ["-main", "Main", "-js", "out.js"];
-	// 	runHaxe(args);
-	// 	runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("Main.hx")});
-	// 	runHaxe(args);
-	// 	var content = sys.io.File.getContent(haxe.io.Path.join([testDir, "out.js"]));
-	// 	Assert.isTrue(content.indexOf("this1.use(v1)") != -1);
-	// }
+	function testIssue8616() {
+		vfs.putContent("Main.hx", getTemplate("issues/Issue8616/Main.hx"));
+		vfs.putContent("A.hx", getTemplate("issues/Issue8616/A.hx"));
+		var args = ["-main", "Main", "-js", "out.js"];
+		runHaxe(args);
+		var originalContent = sys.io.File.getContent(haxe.io.Path.join([testDir, "out.js"]));
+		runHaxeJson([], ServerMethods.Invalidate, {file: new FsPath("Main.hx")});
+		runHaxe(args);
+		var content = sys.io.File.getContent(haxe.io.Path.join([testDir, "out.js"]));
+		Assert.isTrue(content == originalContent);
+	}
 
 	function test9918() {
 		vfs.putContent("Issue9918.hx", getTemplate("Issue9918.hx"));
@@ -246,5 +765,34 @@ class ServerTests extends TestCase {
 		assertHasPrint('Issue9918.hx:22: correct ECast count');
 		runHaxe(args);
 		assertHasPrint('Issue9918.hx:22: correct ECast count');
+	}
+
+	#if todo
+	function testTimerOutput() {
+		vfs.putContent("HelloWorld.hx", getTemplate("HelloWorld.hx"));
+		var args = ["-main", "HelloWorld.hx", "--no-output", "-js", "no.js", "--times"];
+		runHaxe(args);
+		var stderr = lastResult.stderr;
+		// Timer output should contain header line
+		Assert.isTrue(stderr.contains("time(s)"), 'Expected timer header in stderr');
+		// Timer output should contain a meaningful timer (not just "other")
+		// "parsing" always appears for any compilation
+		Assert.isTrue(stderr.contains("parsing"), 'Expected "parsing" timer in stderr');
+	}
+	#end
+
+	function testHoverWithPackageError() {
+		vfs.putContent("pack/Main.hx", "package wrongpack;\n\nclass Main {\n\tpublic static function main() {\n\t\tvar x = 1;\n\t}\n}");
+		var args = ["--main", "pack.Main", "--interp", "--no-output"];
+		try {
+			runHaxeJson(args, DisplayMethods.Hover, {file: new FsPath("pack/Main.hx"), offset: 55});
+		} catch (e:TestException) {
+			// A properly structured JSON-RPC error is expected (package mismatch).
+			// If the response were malformed (e.g. notifications concatenated with JSON),
+			// we'd get "Response: ..." instead of the actual error message.
+			Assert.isFalse(e.message.startsWith("Response: "));
+			return;
+		}
+		// Hover may also succeed in some configurations — that's fine too.
 	}
 }

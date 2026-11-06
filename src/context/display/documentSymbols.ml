@@ -56,7 +56,7 @@ let collect_module_symbols mname with_locals (pack,decls) =
 		| FFun f ->
 			add_field (
 				if fst cff_name = "new" then Constructor
-				else if ((parent_kind = EnumAbstract or parent_kind = Abstract) && Meta.has_one_of [Meta.Op; Meta.ArrayAccess; Meta.Resolve] cff_meta) then Operator
+				else if ((parent_kind = EnumAbstract || parent_kind = Abstract) && Meta.has_one_of [Meta.Op; Meta.ArrayAccess; Meta.Resolve] cff_meta) then Operator
 				else Method
 			);
 			if with_locals then func field_parent f
@@ -114,7 +114,7 @@ let collect_module_symbols mname with_locals (pack,decls) =
 	) decls;
 	begin match mname with
 	| Some(file,mname) when not (Hashtbl.mem type_decls mname) ->
-		add mname Module {pfile = file; pmin = 0; pmax = 0} (String.concat "." pack) false
+		add mname Module (file_pos file) (String.concat "." pack) false
 	| _ ->
 		()
 	end;
@@ -125,7 +125,7 @@ module Printer = struct
 	open DisplayTypes.SymbolKind
 	open DisplayTypes.SymbolInformation
 
-	let print_module_symbols com symbols filter =
+	let json_of_module_symbols com symbols filter =
 		let regex = Option.map Str.regexp_case_fold filter in
 		let reported = Hashtbl.create 0 in
 		let add si =
@@ -162,6 +162,5 @@ module Printer = struct
 					"symbols",JArray jl
 				]) :: acc
 		) [] symbols in
-		let js = JArray ja in
-		string_of_json js
+		JArray ja
 end

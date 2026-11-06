@@ -60,12 +60,12 @@ enum Constant {
 	/**
 		Represents an integer literal.
 	**/
-	CInt(v:String);
+	CInt(v:String, ?s:String);
 
 	/**
 		Represents a float literal.
 	**/
-	CFloat(f:String);
+	CFloat(f:String, ?s:String);
 
 	/**
 		Represents a string literal.
@@ -214,6 +214,11 @@ enum Binop {
 		`in`
 	**/
 	OpIn;
+
+	/**
+		`??`
+	**/
+	OpNullCoal;
 }
 
 /**
@@ -250,6 +255,11 @@ enum Unop {
 		`...`
 	**/
 	OpSpread;
+}
+
+enum EFieldKind {
+	Normal;
+	Safe;
 }
 
 /**
@@ -307,6 +317,11 @@ typedef Var = {
 	var name:String;
 
 	/**
+		The position of the variable name.
+	**/
+	var ?namePos:Position;
+
+	/**
 		The type-hint of the variable, if available.
 	**/
 	var ?type:ComplexType;
@@ -322,7 +337,12 @@ typedef Var = {
 	var ?isFinal:Bool;
 
 	/**
-		Metadata associatied with the variable, if available.
+		Whether or not the variable is static.
+	**/
+	var ?isStatic:Bool;
+
+	/**
+		Metadata associated with the variable, if available.
 	**/
 	var ?meta:Metadata;
 }
@@ -424,8 +444,10 @@ enum ExprDef {
 
 	/**
 		Field access on `e.field`.
+
+		If `kind` is null, it is equal to Normal.
 	**/
-	EField(e:Expr, field:String);
+	EField(e:Expr, field:String, ?kind:EFieldKind);
 
 	/**
 		Parentheses `(e)`.
@@ -546,11 +568,6 @@ enum ExprDef {
 	EDisplay(e:Expr, displayKind:DisplayKind);
 
 	/**
-		Used internally to provide completion.
-	**/
-	EDisplayNew(t:TypePath);
-
-	/**
 		A `(econd) ? eif : eelse` expression.
 	**/
 	ETernary(econd:Expr, eif:Expr, eelse:Expr);
@@ -653,6 +670,16 @@ typedef TypePath = {
 		`pack.Module.Type` has `name = "Module"`, `sub = "Type"`, if available.
 	**/
 	var ?sub:String;
+
+	/**
+		The full position of the type path, including type parameters.
+	**/
+	var ?pos:Position;
+
+	/**
+		The position of the dot-path itself, without type parameters.
+	**/
+	var ?posPath:Position;
 }
 
 /**
@@ -680,6 +707,11 @@ typedef TypeParamDecl = {
 		The optional constraints of the type parameter.
 	**/
 	var ?constraints:Array<ComplexType>;
+
+	/**
+		The optional default type of the type parameter.
+	**/
+	var ?defaultType:Null<ComplexType>;
 
 	/**
 		The optional parameters of the type parameter.
@@ -877,6 +909,11 @@ enum Access {
 		Overload access modifier.
 	**/
 	AOverload;
+
+	/**
+		Enum access modifier.
+	**/
+	AEnum;
 }
 
 /**
@@ -977,12 +1014,35 @@ enum TypeDefKind {
 	/**
 		Represents an abstract kind.
 	**/
-	TDAbstract(tthis:Null<ComplexType>, ?from:Array<ComplexType>, ?to:Array<ComplexType>);
+	TDAbstract(tthis:Null<ComplexType>, ?flags:Array<AbstractFlag>, ?from:Array<ComplexType>, ?to:Array<ComplexType>);
 
 	/**
 		Represents a module-level field.
 	**/
 	TDField(kind:FieldType, ?access:Array<Access>); // ignore TypeDefinition.fields
+
+}
+
+/**
+	Represents an abstract flag.
+**/
+enum AbstractFlag {
+	/**
+		Indicates that this abstract is an `enum abstract`
+	**/
+	AbEnum;
+
+	/**
+		Indicates that this abstract can be assigned from `ct`.
+		This flag can be added several times to add multiple "from" types.
+	**/
+	AbFrom(ct:ComplexType);
+
+	/**
+		Indicates that this abstract can be assigned to `ct`.
+		This flag can be added several times to add multiple "to" types.
+	**/
+	AbTo(ct:ComplexType);
 }
 
 /**
@@ -993,6 +1053,11 @@ class Error extends Exception {
 		The position of the error.
 	**/
 	public var pos:Position;
+
+	/**
+		Child error messages, if any.
+	**/
+	private var childErrors:Array<Error>;
 
 	/**
 		Instantiates an error with given message and position.

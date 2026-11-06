@@ -1,49 +1,54 @@
 open Globals
 open Ast
 open Type
-open Typecore
 open Common
-open Display
-open DisplayTypes.DisplayMode
 open DisplayTypes
-open DisplayException
 
-let add_removable_code ctx s p prange =
-	ctx.removable_code <- (s,p,prange) :: ctx.removable_code
+let add_replaceable_code ctx reason replacement display_range replace_range =
+	ctx.replaceable_code <- {
+		reason = reason;
+		replacement = replacement;
+		display_range = display_range;
+		replace_range = replace_range;
+	} :: ctx.replaceable_code
 
-let is_diagnostics_run com p = DiagnosticsPrinter.is_diagnostics_file (com.file_keys#get p.pfile)
+let error_in_diagnostics_run com p =
+	let b = DiagnosticsPrinter.is_diagnostics_file com (com.part_scope.file_keys#get p.pfile) in
+	if b then com.part_scope.has_error <- true;
+	b
 
 let find_unused_variables com e =
 	let vars = Hashtbl.create 0 in
 	let pmin_map = Hashtbl.create 0 in
 	let rec loop e = match e.eexpr with
-		| TVar({v_kind = VUser _} as v,eo) when v.v_name <> "_" ->
+		| TVar({v_kind = VUser origin} as v,eo) when v.v_name <> "_" && not (has_var_flag v VUsedByTyper) ->
 			Hashtbl.add pmin_map e.epos.pmin v;
-			let p = match eo with
-				| None -> e.epos
-				| Some e1 ->
-					loop e1;
-					{ e.epos with pmax = e1.epos.pmin }
+			let p,replacement = match eo with
+			| Some e1 when origin <> TVOPatternVariable ->
+				loop e1;
+				{ e.epos with pmax = e1.epos.pmin },""
+			| _ ->
+				e.epos,"_"
 			in
-			Hashtbl.replace vars v.v_id (v,p);
+			Hashtbl.replace vars v.v_id (v,p,replacement);
 		| TLocal ({v_kind = VUser _} as v) ->
 			Hashtbl.remove vars v.v_id;
 		| _ ->
 			Type.iter loop e
 	in
 	loop e;
-	Hashtbl.iter (fun _ (v,p) ->
+	Hashtbl.iter (fun _ (v,p,replacement) ->
 		let p = match (Hashtbl.find_all pmin_map p.pmin) with [_] -> p | _ -> null_pos in
-		add_removable_code com "Unused variable" v.v_pos p
+		add_replaceable_code com "Unused variable" replacement v.v_pos p
 	) vars
 
 let check_other_things com e =
 	let had_effect = ref false in
 	let no_effect p =
-		add_diagnostics_message com "This code has no effect" p DKCompilerError DiagnosticsSeverity.Warning;
+		add_diagnostics_message com "This code has no effect" p (MKWarning(WPointlessCode, []));
 	in
 	let pointless_compound s p =
-		add_diagnostics_message com (Printf.sprintf "This %s has no effect, but some of its sub-expressions do" s) p DKCompilerError DiagnosticsSeverity.Warning;
+		add_diagnostics_message com (Printf.sprintf "This %s has no effect, but some of its sub-expressions do" s) p (MKWarning(WPointlessCode, []));
 	in
 	let rec compound s el p =
 		let old = !had_effect in
@@ -72,7 +77,7 @@ let check_other_things com e =
 		| TCall({eexpr = TField(e1,fa)},el) when not in_value && PurityState.is_pure_field_access fa -> compound "call" el e.epos
 		| TNew _ | TCall _ | TBinop ((Ast.OpAssignOp _ | Ast.OpAssign),_,_) | TUnop ((Ast.Increment | Ast.Decrement),_,_)
 		| TReturn _ | TBreak | TContinue | TThrow _ | TCast (_,Some _)
-		| TIf _ | TTry _ | TSwitch _ | TWhile _ | TFor _ ->
+		| TIf _ | TTry _ | TSwitch _ | TWhile _ ->
 			had_effect := true;
 			Type.iter (loop true) e
 		| TParenthesis e1 | TMeta(_,e1) ->
@@ -90,40 +95,34 @@ let check_other_things com e =
 	in
 	loop true e
 
-let prepare_field dctx com cf = match cf.cf_expr with
+let prepare_field dctx dectx com cf = match cf.cf_expr with
 	| None -> ()
 	| Some e ->
 		find_unused_variables dctx e;
 		check_other_things com e;
-		DeprecationCheck.run_on_expr ~force:true com e
+		DeprecationCheck.run_on_expr {dectx with field_meta = cf.cf_meta} e
 
-let prepare com =
-	let dctx = {
-		removable_code = [];
-		import_positions = PMap.empty;
-		dead_blocks = Hashtbl.create 0;
-		diagnostics_messages = [];
-		unresolved_identifiers = [];
-		missing_fields = PMap.empty;
-	} in
+let collect_diagnostics dctx com =
+	let open CompilationCache in
+	let dectx = DeprecationCheck.create_context com in
 	List.iter (function
-		| TClassDecl c when DiagnosticsPrinter.is_diagnostics_file (com.file_keys#get c.cl_pos.pfile) ->
-			List.iter (prepare_field dctx com) c.cl_ordered_fields;
-			List.iter (prepare_field dctx com) c.cl_ordered_statics;
-			(match c.cl_constructor with None -> () | Some cf -> prepare_field dctx com cf);
+		| TClassDecl c when DiagnosticsPrinter.is_diagnostics_file com (com.part_scope.file_keys#get c.cl_pos.pfile) ->
+			let dectx = {dectx with class_meta = c.cl_meta} in
+			List.iter (prepare_field dctx dectx com) c.cl_ordered_fields;
+			List.iter (prepare_field dctx dectx com) c.cl_ordered_statics;
+			(match c.cl_constructor with None -> () | Some cf -> prepare_field dctx dectx com cf);
 		| _ ->
 			()
 	) com.types;
 	let handle_dead_blocks com = match com.cache with
 		| Some cc ->
-			let macro_defines = adapt_defines_to_macro_context com.defines in
-			let display_defines = {macro_defines with values = PMap.add "display" "1" macro_defines.values} in
+			let display_defines = adapt_defines_to_display_context com.defines in
 			let is_true defines e =
 				ParserEntry.is_true (ParserEntry.eval defines e)
 			in
 			Hashtbl.iter (fun file_key cfile ->
-				if DisplayPosition.display_position#is_in_file (com.file_keys#get cfile.CompilationServer.c_file_path) then begin
-					let dead_blocks = cfile.CompilationServer.c_pdi.pd_dead_blocks in
+				if DisplayPosition.display_position#is_in_file (com.part_scope.file_keys#get cfile.c_file_path.file) then begin
+					let dead_blocks = cfile.c_pdi.pd_dead_blocks in
 					let dead_blocks = List.filter (fun (_,e) -> not (is_true display_defines e)) dead_blocks in
 					try
 						let dead_blocks2 = Hashtbl.find dctx.dead_blocks file_key in
@@ -137,7 +136,17 @@ let prepare com =
 		| None ->
 			()
 	in
-	handle_dead_blocks com;
+	handle_dead_blocks com
+
+let prepare com =
+	let dctx = {
+		replaceable_code = [];
+		import_positions = PMap.empty;
+		dead_blocks = Hashtbl.create 0;
+		messages = [];
+	} in
+	if not (List.exists (fun cm -> Message.cm_severity cm = Message.MessageSeverity.Error) com.part_scope.messages) then
+		collect_diagnostics dctx com;
 	let process_modules com =
 		List.iter (fun m ->
 			PMap.iter (fun p b ->
@@ -148,17 +157,7 @@ let prepare com =
 					b' := true
 				end
 			) m.m_extra.m_display.m_import_positions;
-		) com.modules;
-		List.iter (function
-			| MissingFields mf ->
-				let p = mf.mf_pos in
-				begin try
-					let _,l = PMap.find p dctx.missing_fields in
-					l := mf :: !l
-				with Not_found ->
-					dctx.missing_fields <- PMap.add p (mf.mf_on,ref [mf]) dctx.missing_fields
-				end
-		) com.display_information.module_diagnostics
+		) com.modules
 	in
 	process_modules com;
 	begin match com.get_macros() with
@@ -166,17 +165,13 @@ let prepare com =
 	| Some com -> process_modules com
 	end;
 	(* We do this at the end because some of the prepare functions might add information to the common context. *)
-	dctx.diagnostics_messages <- com.shared.shared_display_information.diagnostics_messages;
-	dctx.unresolved_identifiers <- com.display_information.unresolved_identifiers;
+	dctx.messages <- com.part_scope.messages;
 	dctx
-
-let secure_generated_code ctx e =
-	if is_diagnostics_run ctx.com e.epos then mk (TMeta((Meta.Extern,[],e.epos),e)) e.etype e.epos else e
 
 let print com =
 	let dctx = prepare com in
-	Json.string_of_json (DiagnosticsPrinter.json_of_diagnostics dctx)
+	Json.string_of_json (DiagnosticsPrinter.json_of_diagnostics com dctx)
 
 let run com =
 	let dctx = prepare com in
-	DisplayException.raise_diagnostics dctx
+	dctx

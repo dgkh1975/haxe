@@ -83,8 +83,8 @@ class Int64Helper {
 
 		var noFractions = f - (f % 1);
 
-		// 2^53-1 and -2^53+1: these are parseable without loss of precision.
-		// In theory 2^53 and -2^53 are parseable too, but then there's no way to
+		// 2^53-1 and -2^53+1: these are parsable without loss of precision.
+		// In theory 2^53 and -2^53 are parsable too, but then there's no way to
 		// distinguish 2^53 from 2^53+1
 		// (i.e. trace(9007199254740992. + 1. > 9007199254740992.); // false!)
 		if (noFractions > 9007199254740991) {
@@ -94,23 +94,29 @@ class Int64Helper {
 			throw "Conversion underflow";
 		}
 
-		var result = Int64.ofInt(0);
 		var neg = noFractions < 0;
 		var rest = neg ? -noFractions : noFractions;
 
-		var i = 0;
-		while (rest >= 1) {
-			var curr = rest % 2;
-			rest = rest / 2;
-			if (curr >= 1) {
-				result = Int64.add(result, Int64.shl(Int64.ofInt(1), i));
-			}
-			i++;
-		}
+		// rest < 2^53: split it directly in two 32-bit words
+		var high = Math.ffloor(rest / 4294967296.);
+		var low = rest - high * 4294967296.;
+		if (low >= 2147483648.)
+			low -= 4294967296.;
+		var result = Int64.make(Std.int(high), Std.int(low));
+		return neg ? Int64.neg(result) : result;
+	}
 
-		if (neg) {
-			result = Int64.neg(result);
-		}
-		return result;
+	/**
+		Converts an `Int64` to a `Float`.
+
+		Loss of precision may occur for values whose magnitude exceeds 2^53.
+	**/
+	public static function toFloat(x:Int64):Float {
+		var high = x.high;
+		var low = x.low;
+		// `low` is treated as an unsigned 32-bit word; both terms are exactly
+		// representable as Float, so the single addition yields the correctly
+		// rounded result.
+		return high * 4294967296. + (low < 0 ? 4294967296. + low : low);
 	}
 }

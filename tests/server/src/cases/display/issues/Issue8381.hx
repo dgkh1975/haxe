@@ -17,11 +17,10 @@ class Issue8381 extends DisplayTestCase {
 		}
 	**/
 	function test(_) {
-		runHaxeJson([], DisplayMethods.Hover, {
+		var result = runHaxeJson([], DisplayMethods.Hover, {
 			file: file,
 			offset: offset(1)
 		});
-		var result = parseHover();
-		Assert.equals(DisplayItemKind.ClassField, result.result.item.kind);
+		Assert.equals(result.item.kind, DisplayItemKind.ClassField);
 	}
 }

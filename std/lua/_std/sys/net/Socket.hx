@@ -22,6 +22,36 @@
 
 package sys.net;
 
+#if lua_vanilla
+
+class Socket {
+	public var input(default, null):haxe.io.Input;
+	public var output(default, null):haxe.io.Output;
+
+	static inline function notImplemented():Dynamic
+		throw new haxe.exceptions.NotImplementedException("Socket cannot be used with -D lua-vanilla because it requires luasocket");
+
+	public function new():Void notImplemented();
+	public function close():Void notImplemented();
+	public function read():String return notImplemented();
+	public function write(content:String):Void notImplemented();
+	public function connect(host:Host, port:Int):Void notImplemented();
+	public function listen(connections:Int):Void notImplemented();
+	public function shutdown(read:Bool, write:Bool):Void notImplemented();
+	public function bind(host:Host, port:Int):Void notImplemented();
+	public function accept():Socket return notImplemented();
+	public function peer():{host:Host, port:Int} return notImplemented();
+	public function host():{host:Host, port:Int} return notImplemented();
+	public function setTimeout(timeout:Float):Void notImplemented();
+	public function waitForRead():Void notImplemented();
+	public function setBlocking(b:Bool):Void notImplemented();
+	public function setFastSend(b:Bool):Void notImplemented();
+	public static function select(read:Array<Socket>, write:Array<Socket>, others:Array<Socket>,
+			?timeout:Float):{read:Array<Socket>, write:Array<Socket>, others:Array<Socket>} return notImplemented();
+}
+
+#else
+
 import lua.lib.luasocket.Socket as LuaSocket;
 import lua.lib.luasocket.socket.*;
 import lua.*;
@@ -29,6 +59,8 @@ import lua.*;
 import haxe.io.Bytes;
 import haxe.io.Error;
 
+// Can't enable @:coreApi because field 'custom' has different visibility (extern fields default to public, but class fields don't)
+@:coreApi(check = Off)
 class Socket {
 	public var input(default, null):haxe.io.Input;
 
@@ -43,6 +75,16 @@ class Socket {
 
 	public function new():Void {}
 
+	private function getTcpMaster():TcpMaster {
+		if (_socket == null) {
+			final res = LuaSocket.tcp();
+			if (res.message != null)
+				throw 'Socket Error : ${res.message}';
+			_socket = res.result;
+		}
+		return cast _socket;
+	}
+
 	public function close():Void {
 		_socket.close();
 	}
@@ -56,21 +98,17 @@ class Socket {
 	}
 
 	public function connect(host:Host, port:Int):Void {
-		var res = LuaSocket.connect(host.host, port);
-		if (res.message != null)
-			throw 'Socket Error : ${res.message}';
-		input = new SocketInput(res.result);
-		output = new SocketOutput(res.result);
-		_socket = res.result;
+		final master = getTcpMaster();
+		master.connect(host.host, port);
+		final client:TcpClient = cast _socket;
+		input = new SocketInput(client);
+		output = new SocketOutput(client);
 		_socket.settimeout(timeout);
 	}
 
 	public function listen(connections:Int):Void {
-		var res = LuaSocket.tcp();
-		if (res.message != null)
-			throw 'Socket Listen Error : ${res.message}';
-		res.result.listen(connections);
-		_socket = res.result;
+		final server:TcpMaster = getTcpMaster();
+		server.listen(connections);
 		_socket.settimeout(timeout);
 	}
 
@@ -89,10 +127,11 @@ class Socket {
 	}
 
 	public function bind(host:Host, port:Int):Void {
-		var res = LuaSocket.bind(host.host, port);
-		if (res.message != null)
-			throw 'Socket Bind Error : ${res.message}';
-		_socket = res.result;
+		final master = getTcpMaster();
+		// like the other targets, so a port can be bound again while connections on it are in TIME_WAIT
+		if (Sys.systemName() != "Windows")
+			master.setoption(ReuseAddress, true);
+		master.bind(host.host, port);
 	}
 
 	public function accept():Socket {
@@ -161,74 +200,4 @@ class Socket {
 	}
 }
 
-private class SocketInput extends haxe.io.Input {
-	var tcp:TcpClient;
-
-	public function new(tcp:TcpClient) {
-		this.tcp = tcp;
-	}
-
-	override public function readByte():Int {
-		var res = tcp.receive(1);
-		if (res.message == "closed"){
-			throw new haxe.io.Eof();
-		}
-		else if (res.message != null)
-			throw 'Error : ${res.message}';
-		return res.result.charCodeAt(0);
-	}
-
-	override public function readBytes(s:Bytes, pos:Int, len:Int):Int {
-		var leftToRead = len;
-		var b = s.getData();
-		if (pos < 0 || len < 0 || pos + len > s.length)
-			throw haxe.io.Error.OutsideBounds;
-		var readCount = 0;
-		try {
-			while (leftToRead > 0) {
-				b[pos] = cast readByte();
-				pos++;
-				readCount++;
-				leftToRead--;
-			}
-		} catch (e:haxe.io.Eof) {
-			if (readCount == 0) {
-				throw e;
-			}
-		}
-		return readCount;
-	}
-
-}
-
-private class SocketOutput extends haxe.io.Output {
-	var tcp:TcpClient;
-
-	public function new(tcp:TcpClient) {
-		this.tcp = tcp;
-	}
-
-	override public function writeByte(c:Int):Void {
-		var char = NativeStringTools.char(c);
-		var res = tcp.send(char);
-		if (res.message != null){
-			throw 'Error : Socket writeByte : ${res.message}';
-		}
-	}
-
-	override public function writeBytes(s:Bytes, pos:Int, len:Int):Int {
-		if (pos < 0 || len < 0 || pos + len > s.length)
-			throw Error.OutsideBounds;
-		var b = s.getData().slice(pos, pos +len).map(function(byte){
-			return lua.NativeStringTools.char(byte);
-		});
-		var encoded = Table.concat(cast b, 0);
-		var res = tcp.send(encoded);
-		if (res.message != null){
-			throw 'Error : Socket writeByte : ${res.message}';
-		}
-
-		return len;
-	}
-
-}
+#end

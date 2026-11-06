@@ -1,8 +1,6 @@
 open Globals
-open Path
 open Ast
 open Type
-open Json
 open Genjson
 
 module SymbolKind = struct
@@ -61,42 +59,6 @@ module SymbolInformation = struct
 		container_name = container_name;
 		deprecated = deprecated;
 	}
-end
-
-module DiagnosticsSeverity = struct
-	type t =
-		| Error
-		| Warning
-		| Information
-		| Hint
-
-	let to_int = function
-		| Error -> 1
-		| Warning -> 2
-		| Information -> 3
-		| Hint -> 4
-end
-
-module DiagnosticsKind = struct
-	type t =
-		| DKUnusedImport
-		| DKUnresolvedIdentifier
-		| DKCompilerError
-		| DKRemovableCode
-		| DKParserError
-		| DKDeprecationWarning
-		| DKInactiveBlock
-		| DKMissingFields
-
-	let to_int = function
-		| DKUnusedImport -> 0
-		| DKUnresolvedIdentifier -> 1
-		| DKCompilerError -> 2
-		| DKRemovableCode -> 3
-		| DKParserError -> 4
-		| DKDeprecationWarning -> 5
-		| DKInactiveBlock -> 6
-		| DKMissingFields -> 7
 end
 
 module CompletionResultKind = struct
@@ -211,17 +173,13 @@ module DisplayMode = struct
 		| DMDefinition
 		| DMTypeDefinition
 		| DMImplementation
-		| DMResolve of string
 		| DMPackage
 		| DMHover
 		| DMModuleSymbols of string option
-		| DMDiagnostics of Path.UniqueKey.t list
-		| DMStatistics
 		| DMSignature
 
 	type error_policy =
 		| EPIgnore
-		| EPCollect
 		| EPShow
 
 	type display_file_policy =
@@ -231,7 +189,6 @@ module DisplayMode = struct
 
 	type settings = {
 		dms_kind : t;
-		dms_display : bool;
 		dms_full_typing : bool;
 		dms_force_macro_typing : bool;
 		dms_error_policy : error_policy;
@@ -239,12 +196,12 @@ module DisplayMode = struct
 		dms_inline : bool;
 		dms_display_file_policy : display_file_policy;
 		dms_exit_during_typing : bool;
+		dms_populate_cache : bool;
 		dms_per_file : bool;
 	}
 
 	let default_display_settings = {
 		dms_kind = DMDefault;
-		dms_display = true;
 		dms_full_typing = false;
 		dms_force_macro_typing = false;
 		dms_error_policy = EPIgnore;
@@ -252,12 +209,12 @@ module DisplayMode = struct
 		dms_inline = false;
 		dms_display_file_policy = DFPOnly;
 		dms_exit_during_typing = true;
+		dms_populate_cache = false;
 		dms_per_file = false;
 	}
 
 	let default_compilation_settings = {
 		dms_kind = DMNone;
-		dms_display = false;
 		dms_full_typing = true;
 		dms_force_macro_typing = true;
 		dms_error_policy = EPShow;
@@ -265,6 +222,7 @@ module DisplayMode = struct
 		dms_inline = true;
 		dms_display_file_policy = DFPNo;
 		dms_exit_during_typing = false;
+		dms_populate_cache = true;
 		dms_per_file = false;
 	}
 
@@ -272,7 +230,7 @@ module DisplayMode = struct
 		let settings = { default_display_settings with dms_kind = dm } in
 		match dm with
 		| DMNone -> default_compilation_settings
-		| DMDefault | DMDefinition | DMTypeDefinition | DMResolve _ | DMPackage | DMHover | DMSignature -> settings
+		| DMDefault | DMDefinition | DMTypeDefinition | DMPackage | DMHover | DMSignature -> settings
 		| DMUsage _ | DMImplementation -> { settings with
 				dms_full_typing = true;
 				dms_force_macro_typing = true;
@@ -285,20 +243,6 @@ module DisplayMode = struct
 				dms_force_macro_typing = false;
 				dms_per_file = true;
 			}
-		| DMDiagnostics files -> { default_compilation_settings with
-				dms_kind = DMDiagnostics files;
-				dms_error_policy = EPCollect;
-				dms_display_file_policy = if files = [] then DFPNo else DFPAlso;
-				dms_per_file = true;
-			}
-		| DMStatistics -> { settings with
-				dms_full_typing = true;
-				dms_inline = false;
-				dms_display_file_policy = DFPAlso;
-				dms_exit_during_typing = false;
-				dms_force_macro_typing = true;
-				dms_per_file = true;
-			}
 
 	let to_string = function
 		| DMNone -> "none"
@@ -306,15 +250,12 @@ module DisplayMode = struct
 		| DMDefinition -> "position"
 		| DMTypeDefinition -> "type-definition"
 		| DMImplementation -> "implementation"
-		| DMResolve s -> "resolve " ^ s
 		| DMPackage -> "package"
 		| DMHover -> "type"
 		| DMUsage (true,_,_) -> "rename"
 		| DMUsage (false,_,_) -> "references"
 		| DMModuleSymbols None -> "module-symbols"
 		| DMModuleSymbols (Some s) -> "workspace-symbols " ^ s
-		| DMDiagnostics _ -> "diagnostics"
-		| DMStatistics -> "statistics"
 		| DMSignature -> "signature"
 end
 
@@ -324,7 +265,7 @@ type symbol =
 	| SKEnum of tenum
 	| SKTypedef of tdef
 	| SKAbstract of tabstract
-	| SKField of tclass_field * path option (* path - class path *)
+	| SKField of tclass_field * tclass option
 	| SKConstructor of tclass_field
 	| SKEnumField of tenum_field
 	| SKVariable of tvar
@@ -384,25 +325,20 @@ and missing_fields_diagnostics = {
 	mf_cause : missing_field_cause;
 }
 
-and module_diagnostics =
-	| MissingFields of missing_fields_diagnostics
+type replaceable_code = {
+	reason : string;
+	replacement : string;
+	display_range : pos;
+	replace_range : pos;
+}
 
 type diagnostics_context = {
-	mutable removable_code : (string * pos * pos) list;
+	mutable replaceable_code : replaceable_code list;
 	mutable import_positions : (pos,bool ref) PMap.t;
 	mutable dead_blocks : (Path.UniqueKey.t,(pos * expr) list) Hashtbl.t;
-	mutable unresolved_identifiers : (string * pos * (string * CompletionItem.t * int) list) list;
-	mutable diagnostics_messages : (string * pos * DiagnosticsKind.t * DiagnosticsSeverity.t) list;
-	mutable missing_fields : (pos,(module_type * (missing_fields_diagnostics list ref))) PMap.t;
+	mutable messages : Message.t list;
 }
 
 type display_exception_kind =
-	| DisplayDiagnostics of diagnostics_context
-	| Statistics of string
-	| ModuleSymbols of string
-	| Metadata of string
-	| DisplaySignatures of (((tsignature * CompletionItem.CompletionType.ct_function) * documentation) list * int * int * signature_kind) option
-	| DisplayHover of hover_result option
-	| DisplayPositions of pos list
-	| DisplayFields of fields_result option
-	| DisplayPackage of string list
+	| DisplayHover of hover_result
+	| DisplayFields of fields_result

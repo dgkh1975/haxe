@@ -52,8 +52,10 @@ class JsonPrinter {
 	var indent:String;
 	var pretty:Bool;
 	var nind:Int;
+	var stack : Map<{},Bool> = [];
+	var depth : Int = 0;
 
-	function new(replacer:(key:Dynamic, value:Dynamic) -> Dynamic, space:String) {
+	function new(replacer:Null<(key:Dynamic, value:Dynamic) -> Dynamic>, space:Null<String>) {
 		this.replacer = replacer;
 		this.indent = space;
 		this.pretty = space != null;
@@ -86,7 +88,7 @@ class JsonPrinter {
 				add('"???"');
 			case TObject:
 				objString(v);
-			case TInt:
+			case TInt, TInt64:
 				add(#if (jvm || hl) Std.string(v) #else v #end);
 			case TFloat:
 				add(Math.isFinite(v) ? Std.string(v) : 'null');
@@ -118,18 +120,20 @@ class JsonPrinter {
 					addChar(']'.code);
 				} else if (c == haxe.ds.StringMap) {
 					var v:haxe.ds.StringMap<Dynamic> = v;
+					beginStack(v);
 					var o = {};
 					for (k in v.keys())
 						Reflect.setField(o, k, v.get(k));
 					objString(o);
+					endStack(v);
 				} else if (c == Date) {
 					var v:Date = v;
 					quote(v.toString());
 				} else
 					classString(v);
 			case TEnum(_):
-				var i:Dynamic = Type.enumIndex(v);
-				add(i);
+				var i = Type.enumIndex(v);
+				add(Std.string(i));
 			case TBool:
 				add(#if (php || jvm || hl) (v ? 'true' : 'false') #else v #end);
 			case TNull:
@@ -161,20 +165,33 @@ class JsonPrinter {
 	inline function objString(v:Dynamic) {
 		fieldsString(v, Reflect.fields(v));
 	}
+	
+	inline function beginStack(v:Dynamic) {
+		depth++;
+		if( depth > 10 ) {
+			if( stack.exists(v) ) throw "Cannot stringify circular structure";
+			stack.set(v, true);
+		}
+	}
+	
+	inline function endStack(v:Dynamic) {
+		if( depth > 10 ) stack.remove(v);
+		depth--;
+	}
 
 	function fieldsString(v:Dynamic, fields:Array<String>) {
+		beginStack(v);
 		addChar('{'.code);
 		var len = fields.length;
-		var last = len - 1;
-		var first = true;
+		var empty = true;
 		for (i in 0...len) {
 			var f = fields[i];
 			var value = Reflect.field(v, f);
 			if (Reflect.isFunction(value))
 				continue;
-			if (first) {
+			if (empty) {
 				nind++;
-				first = false;
+				empty = false;
 			} else
 				addChar(','.code);
 			newl();
@@ -184,13 +201,14 @@ class JsonPrinter {
 			if (pretty)
 				addChar(' '.code);
 			write(f, value);
-			if (i == last) {
-				nind--;
-				newl();
-				ipad();
-			}
+		}
+		if (!empty) {
+			nind--;
+			newl();
+			ipad();
 		}
 		addChar('}'.code);
+		endStack(v);
 	}
 
 	function quote(s:String) {

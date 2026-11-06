@@ -25,6 +25,7 @@ package haxe.display;
 import haxe.display.JsonModuleTypes;
 import haxe.display.Position;
 import haxe.display.Protocol;
+import haxe.ds.ReadOnlyArray;
 
 /**
 	Methods of the JSON-RPC-based `--display` protocol in Haxe 4.
@@ -32,6 +33,11 @@ import haxe.display.Protocol;
 **/
 @:publicFields
 class DisplayMethods {
+	/**
+		The request is sent from the client to Haxe to get diagnostics for a specific file, a list of files or the whole project.
+	**/
+	static inline var Diagnostics = new HaxeRequestMethod<DiagnosticsParams, DiagnosticsResult>("display/diagnostics");
+
 	/**
 		The completion request is sent from the client to Haxe to request code completion.
 		Haxe automatically determines the type of completion to use based on the passed position, see `CompletionResultKind`.
@@ -78,11 +84,35 @@ class DisplayMethods {
 	**/
 	static inline var SignatureHelp = new HaxeRequestMethod<SignatureHelpParams, SignatureHelpResult>("display/signatureHelp");
 
+	/**
+		The metadata request is sent from the client to Haxe to get a list of all registered metadata and their documentation.
+	**/
+	static inline var Metadata = new HaxeRequestMethod<MetadataParams, MetadataResult>("display/metadata");
+
+	/**
+		The defines request is sent from the client to Haxe to get a list of all registered defines and their documentation.
+	**/
+	static inline var Defines = new HaxeRequestMethod<DefinesParams, DefinesResult>("display/defines");
+
+	/**
+		The document symbols request is sent from the client to Haxe to list all symbols of a given Haxe file.
+	**/
+	static inline var DocumentSymbols = new HaxeRequestMethod<FileParams, DocumentSymbolsResult>("display/documentSymbols");
+
+	/**
+		The workspace symbols request is sent from the client to Haxe to list all symbols matching a query string.
+	**/
+	static inline var WorkspaceSymbols = new HaxeRequestMethod<WorkspaceSymbolsParams, WorkspaceSymbolsResult>("display/workspaceSymbols");
+
+	/**
+		The statistics request is sent from the client to Haxe to get symbol statistics (references, overrides, etc.) for a given file.
+	**/
+	static inline var Statistics = new HaxeRequestMethod<FileParams, StatisticsResult>("display/statistics");
+
 	/*
 		TODO:
 
 		- finish completion
-		- diagnostics
 		- codeLens
 		- workspaceSymbols ("project/symbol"?)
 	 */
@@ -114,7 +144,7 @@ typedef DisplayLocal<T> = {
 	var id:Int;
 	var name:String;
 	var type:JsonType<T>;
-	var origin:LocalOrigin;
+	var ?origin:LocalOrigin;
 	var capture:Bool;
 	var ?extra:{
 		var params:Array<JsonTypeParameter>;
@@ -149,7 +179,7 @@ enum abstract ClassFieldOriginKind<T>(Int) {
 
 	/**
 		The field is declared on a parent type, such as:
-		- a super class field that is not overriden
+		- a super class field that is not overridden
 		- a forwarded abstract field
 	**/
 	var Parent:ClassFieldOriginKind<JsonModuleType<T>>;
@@ -281,7 +311,6 @@ enum abstract Platform(String) {
 	var Flash = "flash";
 	var Php = "php";
 	var Cpp = "cpp";
-	var Cs = "cs";
 	var Java = "java";
 	var Python = "python";
 	var Hl = "hl";
@@ -295,6 +324,7 @@ typedef Metadata = {
 	var platforms:Array<Platform>;
 	var targets:Array<MetadataTarget>;
 	var internal:Bool;
+	var ?origin:String;
 	var ?links:Array<String>;
 }
 
@@ -305,6 +335,9 @@ typedef Define = {
 	var parameters:Array<String>;
 	var platforms:Array<Platform>;
 	var links:Array<String>;
+	var ?origin:String;
+	var ?deprecated:String;
+	var ?reserved:Bool;
 }
 
 typedef Keyword = {
@@ -395,7 +428,7 @@ typedef DisplayItem<T> = {
 }
 
 typedef DisplayItemOccurrence<T> = {
-	var range:Range;
+	var ?range:Range;
 	var item:DisplayItem<T>;
 	var ?moduleType:JsonModuleType<Dynamic>;
 	var ?moduleTypeFollowed:JsonModuleType<Dynamic>;
@@ -424,6 +457,17 @@ typedef StructExtensionCompletion = {
 typedef PatternCompletion<T> = ToplevelCompletion<T> & {
 	var isOutermostPattern:Bool;
 }
+
+typedef DiagnosticsParams = {
+	var ?file:FsPath;
+	var ?contents:String;
+	var ?fileContents:Array<{file:FsPath, ?contents:String}>;
+}
+
+typedef DiagnosticsResult = Response<ReadOnlyArray<{
+	var file:FsPath;
+	var diagnostics:ReadOnlyArray<Diagnostic<Any>>;
+}>>
 
 enum abstract CompletionModeKind<T>(Int) {
 	var Field:CompletionModeKind<FieldCompletionSubject<Dynamic>>;
@@ -480,7 +524,7 @@ enum abstract FindReferencesKind(String) to String {
 	var Direct = "direct";
 
 	/**
-		Find references to the base field and all the overidding fields in the inheritance chain.
+		Find references to the base field and all the overriding fields in the inheritance chain.
 	**/
 	var WithBaseAndDescendants = "withBaseAndDescendants";
 
@@ -541,6 +585,85 @@ typedef SignatureItem = {
 }
 
 typedef SignatureHelpResult = Response<Null<SignatureItem>>;
+
+typedef MetadataParams = {
+	var compiler:Bool;
+	var user:Bool;
+}
+
+typedef MetadataResult = Response<Array<Metadata>>;
+
+typedef DefinesParams = {
+	var compiler:Bool;
+	var user:Bool;
+}
+
+typedef DefinesResult = Response<Array<Define>>;
+
+/** DocumentSymbols / WorkspaceSymbols **/
+
+enum abstract ModuleSymbolKind(Int) {
+	var Class = 1;
+	var Interface;
+	var Enum;
+	var TypeAlias;
+	var Abstract;
+	var Field;
+	var Property;
+	var Method;
+	var Constructor;
+	var Function;
+	var Variable;
+	var Struct;
+	var EnumAbstract;
+	var Operator;
+	var EnumMember;
+	var Constant;
+	var Module;
+}
+
+typedef ModuleSymbol = {
+	var name:String;
+	var kind:ModuleSymbolKind;
+	var range:Range;
+	var ?containerName:String;
+	var ?isDeprecated:Bool;
+}
+
+typedef ModuleSymbolsEntry = {
+	var file:FsPath;
+	var symbols:Array<ModuleSymbol>;
+}
+
+typedef WorkspaceSymbolsParams = {
+	var filter:String;
+}
+
+typedef DocumentSymbolsResult = Response<Array<ModuleSymbolsEntry>>;
+typedef WorkspaceSymbolsResult = Response<Array<ModuleSymbolsEntry>>;
+
+/** Statistics **/
+
+typedef StatisticsEntry = {
+	var range:Range;
+	var ?kind:String;
+	var ?references:Array<StatisticsRelation>;
+	var ?implementers:Array<StatisticsRelation>;
+	var ?subclasses:Array<StatisticsRelation>;
+	var ?overrides:Array<StatisticsRelation>;
+}
+
+typedef StatisticsRelation = {
+	var range:Range;
+	var file:String;
+}
+
+typedef StatisticsFileResult = {
+	var file:String;
+	var statistics:Array<StatisticsEntry>;
+}
+
+typedef StatisticsResult = Response<Array<StatisticsFileResult>>;
 
 /** General types **/
 typedef PositionParams = FileParams & {

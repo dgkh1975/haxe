@@ -21,11 +21,11 @@ open Ast
 open Globals
 open Type
 open Nast
-open Common
+open Gctx
 
 type context = {
 	version : int;
-	com : Common.context;
+	com : Gctx.t;
 	packages : (string list, unit) Hashtbl.t;
 	globals : (string list * string, string) Hashtbl.t;
 	mutable curglobal : int;
@@ -50,18 +50,19 @@ let pos ctx p =
 			try
 				Hashtbl.find files p.pfile
 			with Not_found ->
-				let path = (match Common.defined ctx.com Common.Define.AbsolutePath with
+				let path = (match Gctx.defined ctx.com Define.AbsolutePath with
 				| true -> if (Filename.is_relative p.pfile)
 					then Filename.concat (Sys.getcwd()) p.pfile
 					else p.pfile
 				| false -> try
 					(* lookup relative path *)
 					let len = String.length p.pfile in
-					let base = List.find (fun path ->
+					let base = ctx.com.class_paths#find (fun path ->
+						let path = path#path in
 						let l = String.length path in
 						len > l && String.sub p.pfile 0 l = path
-					) ctx.com.Common.class_path in
-					let l = String.length base in
+					) in
+					let l = String.length base#path in
 					String.sub p.pfile l (len - l)
 
 					with Not_found -> p.pfile
@@ -170,9 +171,9 @@ let gen_constant ctx pe c =
 			if (h land 128 = 0) <> (h land 64 = 0) then raise Exit;
 			int p (Int32.to_int i)
 		with _ ->
-			if ctx.version < 2 then abort "This integer is too big to be compiled to a Neko 31-bit integer. Please use a Float instead" pe;
+			if ctx.version < 2 then Error.abort "This integer is too big to be compiled to a Neko 31-bit integer. Please use a Float instead" pe;
 			(EConst (Int32 i),p))
-	| TFloat f -> (EConst (Float f),p)
+	| TFloat f -> (EConst (Float (Texpr.replace_separators f "")),p)
 	| TString s -> call p (field p (ident p "String") "new") [gen_big_string ctx p s]
 	| TBool b -> (EConst (if b then True else False),p)
 	| TNull -> null p
@@ -234,10 +235,8 @@ and gen_expr ctx e =
 	| TBinop (op,e1,e2) ->
 		gen_binop ctx p op e1 e2
 	| TField (e2,FClosure (_,f)) ->
-		(match follow e.etype with
-		| TFun (args,_) ->
-			let n = List.length args in
-			if n > 5 then abort "Cannot create closure with more than 5 arguments" e.epos;
+		let emit n =
+			if n > 5 then Error.abort "Cannot create closure with more than 5 arguments" e.epos;
 			let tmp = ident p "@tmp" in
 			EBlock [
 				(EVars ["@tmp", Some (gen_expr ctx e2); "@fun", Some (field p tmp f.cf_name)] , p);
@@ -246,6 +245,14 @@ and gen_expr ctx e =
 				else
 					call p (ident p ("@closure" ^ string_of_int n)) [tmp;ident p "@fun"]
 			] , p
+		in
+		(match follow_with_coro e.etype with
+		| NotCoro TFun (args,_) ->
+			let n = List.length args in
+			emit n
+		| Coro (args,_) ->
+			let n = List.length args in
+			emit (n + 1)
 		| _ -> die "" __LOC__)
 	| TEnumParameter (e,_,i) ->
 		EArray (field p (gen_expr ctx e) "args",int p i),p
@@ -304,20 +311,6 @@ and gen_expr ctx e =
 		(EFunction (List.map arg_name f.tf_args, with_return e),p)
 	| TBlock el ->
 		(EBlock (List.map (gen_expr ctx) el), p)
-	| TFor (v, it, e) ->
-		let it = gen_expr ctx it in
-		let e = gen_expr ctx e in
-		let next = call p (field p (ident p "@tmp") "next") [] in
-		let next = (if has_var_flag v VCaptured then call p (builtin p "array") [next] else next) in
-		(EBlock
-			[(EVars ["@tmp", Some it],p);
-			(EWhile (call p (field p (ident p "@tmp") "hasNext") [],
-				(EBlock [
-					(EVars [v.v_name, Some next],p);
-					e
-				],p)
-			,NormalWhile),p)]
-		,p)
 	| TIf (cond,e1,e2) ->
 		(* if(e)-1 is parsed as if( e - 1 ) *)
 		let parent e = mk (TParenthesis e) e.etype e.epos in
@@ -370,16 +363,16 @@ and gen_expr ctx e =
 	| TCast (e,None) ->
 		gen_expr ctx e
 	| TCast (e1,Some t) ->
-		gen_expr ctx (Codegen.default_cast ~vtmp:"@tmp" ctx.com e1 t e.etype e.epos)
+		gen_expr ctx (Codegen.default_cast ~vtmp:"@tmp" ctx.com.basic ctx.com.std e1 t e.etype e.epos)
 	| TIdent s ->
 		ident p s
-	| TSwitch (e,cases,eo) ->
+	| TSwitch {switch_subject = e;switch_cases = cases;switch_default = eo} ->
 		let e = gen_expr ctx e in
 		let eo = (match eo with None -> None | Some e -> Some (gen_expr ctx e)) in
 		try
 			(ESwitch (
 				e,
-				List.map (fun (el,e2) ->
+				List.map (fun {case_patterns = el;case_expr = e2} ->
 					match List.map (gen_expr ctx) el with
 					| [] -> die "" __LOC__
 					| [e] -> e, gen_expr ctx e2
@@ -391,7 +384,7 @@ and gen_expr ctx e =
 			Exit ->
 				(EBlock [
 					(EVars ["@tmp",Some e],p);
-					List.fold_left (fun acc (el,e) ->
+					List.fold_left (fun acc {case_patterns = el;case_expr = e} ->
 						let cond = (match el with
 							| [] -> die "" __LOC__
 							| e :: l ->
@@ -554,7 +547,7 @@ let gen_enum ctx e =
 let gen_type ctx t acc =
 	match t with
 	| TClassDecl c ->
-		(match c.cl_init with
+		(match TClass.get_cl_init c with
 		| None -> ()
 		| Some e -> ctx.inits <- (c,e) :: ctx.inits);
 		if (has_class_flag c CExtern) then
@@ -562,7 +555,7 @@ let gen_type ctx t acc =
 		else
 			gen_class ctx c :: acc
 	| TEnumDecl e ->
-		if e.e_extern then
+		if has_enum_flag e EnExtern then
 			acc
 		else
 			gen_enum ctx e :: acc
@@ -621,7 +614,7 @@ let gen_boot ctx =
 
 let gen_name ctx acc t =
 	match t with
-	| TEnumDecl e when e.e_extern ->
+	| TEnumDecl e when has_enum_flag e EnExtern ->
 		acc
 	| TEnumDecl e ->
 		let p = pos ctx e.e_pos in
@@ -662,21 +655,16 @@ let generate_libs_init = function
 	| libs ->
 		(*
 			var @s = $loader.loadprim("std@sys_string",0)();
-			var @env = $loader.loadprim("std@get_env",1);
-			var @b = if( @s == "Windows" )
-				@env("HAXEPATH") + "\\lib\\"
-				else try $loader.loadprim("std@file_contents",1)(@env("HOME")+"/.haxelib") + "/"
-				catch e
-					if( @s == "Linux" )
-						if( $loader(loadprim("std@sys_exists",1))("/usr/lib/haxe/lib") )
-							"/usr/lib/haxe/lib"
-						else
-							"/usr/share/haxe/lib/"
-					else
-						"/usr/local/lib/haxe/lib/";
-			if( try $loader.loadprim("std@sys_file_type",1)(".haxelib") == "dir" catch e false ) @b = $loader.loadprim("std@file_full_path",1)(".haxelib") + "/";
-			if( $loader.loadprim("std@sys_is64",0)() ) @s = @s + 64;
-			@b = @b + "/"
+			if( $version() >= 240 )
+				@s = @s + switch $loader.loadprim("std@sys_cpu_arch",0)() {
+					"arm64" => "Arm64"
+					"arm" => "Arm"
+					"x86_64" => "64"
+					default => ""
+				};
+			else if( $loader.loadprim("std@sys_is64",0)() )
+				@s = @s + 64;
+			@s = @s + "/";
 		*)
 		let p = null_pos in
 		let es = ident p "@s" in
@@ -689,34 +677,25 @@ let generate_libs_init = function
 		let boot = [
 			(EVars [
 				"@s",Some (call p (loadp "sys_string" 0) []);
-				"@env",Some (loadp "get_env" 1);
-				"@b", Some (EIf (op "==" es (str p "Windows"),
-					op "+" (call p (ident p "@env") [str p "HAXEPATH"]) (str p "\\lib\\"),
-					Some (ETry (
-						op "+" (call p (loadp "file_contents" 1) [op "+" (call p (ident p "@env") [str p "HOME"]) (str p "/.haxelib")]) (str p "/"),
-						"e",
-						(EIf (op "==" es (str p "Linux"),
-							(EIf (call p (loadp "sys_exists" 1) [ str p "/usr/lib/haxe/lib" ],
-								str p "/usr/lib/haxe/lib/",
-								Some (str p "/usr/share/haxe/lib/")),p),
-							Some (str p "/usr/local/lib/haxe/lib/")
-						),p)
-					),p)
-				),p);
 			],p);
-			(EIf ((ETry (op "==" (call p (loadp "sys_file_type" 1) [str p ".haxelib"]) (str p "dir"),"e",(EConst False,p)),p),op "=" (ident p "@b") (op "+" (call p (loadp "file_full_path" 1) [str p ".haxelib"]) (str p "/")), None),p);
-			(EIf (call p (loadp "sys_is64" 0) [],op "=" es (op "+" es (int p 64)),None),p);
+			(EIf (op ">=" (call p (builtin p "version") []) (int p 240),
+				(op "=" es (op "+" es (ESwitch (call p (loadp "sys_cpu_arch" 0) [],[
+					(str p "arm64", str p "Arm64");
+					(str p "arm", str p "Arm");
+					(str p "x86_64", str p "64");
+				], Some (str p "")),p))),
+				Some (EIf (call p (loadp "sys_is64" 0) [],op "=" es (op "+" es (int p 64)),None),p)
+			),p);
 			op "=" es (op "+" es (str p "/"));
 		] in
 		let lpath = field p (builtin p "loader") "path" in
 		boot @ List.map (fun dir ->
-			let full_path = dir.[0] = '/' || dir.[1] = ':' in
 			let dstr = str p dir in
 			(*
 				// for each lib dir
-				$loader.path = $array($loader.path,@b+dir+@s);
+				$loader.path = $array(dir+@s,$loader.path);
 			*)
-			op "=" lpath (call p (builtin p "array") [op "+" (if full_path then dstr else op "+" (ident p "@b") dstr) (ident p "@s"); lpath])
+			op "=" lpath (call p (builtin p "array") [op "+" dstr (ident p "@s"); lpath])
 		) libs
 
 let new_context com ver macros =
@@ -784,15 +763,19 @@ let build ctx types =
 	let vars = List.concat (List.map (gen_static_vars ctx) types) in
 	packs @ methods @ boot :: names @ inits @ vars
 
-let generate com =
+let generate neko_lib_paths com =
 	Hashtbl.clear files;
-	let ctx = new_context com (if Common.defined com Define.NekoV1 then 1 else 2) false in
-	let libs = (EBlock (generate_libs_init com.neko_libs) , { psource = "<header>"; pline = 1; }) in
+	let ctx = new_context com (if Gctx.defined com Define.NekoV1 then 1 else 2) false in
+	let libs = (EBlock
+		(if Gctx.defined com Define.NekoNoHaxelibPaths then []
+		else generate_libs_init neko_lib_paths),
+		{ psource = "<header>"; pline = 1; }
+	) in
 	let el = build ctx com.types in
-	let emain = (match com.main with None -> [] | Some e -> [gen_expr ctx e]) in
+	let emain = (match com.main.main_expr with None -> [] | Some e -> [gen_expr ctx e]) in
 	let e = (EBlock ((header()) @ libs :: el @ emain), null_pos) in
-	let source = Common.defined com Define.NekoSource in
-	let use_nekoc = Common.defined com Define.UseNekoc in
+	let source = Gctx.defined com Define.NekoSource in
+	let use_nekoc = Gctx.defined com Define.UseNekoc in
 	if not use_nekoc then begin
 		try
 			Path.mkdir_from_path com.file;
@@ -800,7 +783,7 @@ let generate com =
 			Nbytecode.write ch (Ncompile.compile ctx.version e);
 			IO.close_out ch;
 		with Ncompile.Error (msg,pos) ->
-			let pfile = Common.find_file com pos.psource in
+			let pfile = Gctx.find_file com pos.psource in
 			let rec loop p =
 				let pp = { pfile = pfile; pmin = p; pmax = p; } in
 				if Lexer.get_error_line pp >= pos.pline then
@@ -808,18 +791,18 @@ let generate com =
 				else
 					loop (p + 1)
 			in
-			abort msg (loop 0)
+			Error.abort msg (loop 0)
 	end;
-	let command cmd = try com.run_command cmd with _ -> -1 in
+	let command cmd args = try com.run_command_args cmd args with _ -> -1 in
 	let neko_file = (try Filename.chop_extension com.file with _ -> com.file) ^ ".neko" in
 	if source || use_nekoc then begin
 		let ch = IO.output_channel (open_out_bin neko_file) in
 		Binast.write ch e;
 		IO.close_out ch;
 	end;
-	if use_nekoc && command ("nekoc" ^ (if ctx.version > 1 then " -version " ^ string_of_int ctx.version else "") ^ " \"" ^ neko_file ^ "\"") <> 0 then failwith "Neko compilation failure";
+	if use_nekoc && command "nekoc" (if ctx.version > 1 then ["-version"; (string_of_int ctx.version); Filename.quote neko_file] else [Filename.quote neko_file]) <> 0 then failwith "Neko compilation failure";
 	if source then begin
-		if command ("nekoc -p \"" ^ neko_file ^ "\"") <> 0 then failwith "Failed to print neko code";
+		if command "nekoc" ["-p"; Filename.quote neko_file] <> 0 then failwith "Failed to print neko code";
 		Sys.remove neko_file;
 		Sys.rename ((try Filename.chop_extension com.file with _ -> com.file) ^ "2.neko") neko_file;
 	end

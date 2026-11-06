@@ -74,7 +74,7 @@ class UnsafeStringMap<T> implements haxe.Constraints.IMap<String, T> {
 
 	public function toString():String {
 		var s = new StringBuf();
-		s.add("{");
+		s.add("[");
 		var it = keys();
 		for (i in it) {
 			s.add(i);
@@ -83,12 +83,18 @@ class UnsafeStringMap<T> implements haxe.Constraints.IMap<String, T> {
 			if (it.hasNext())
 				s.add(", ");
 		}
-		s.add("}");
+		s.add("]");
 		return s.toString();
 	}
 
 	public inline function clear():Void {
 		h = new flash.utils.Dictionary();
+	}
+	
+	public function size():Int {
+		var s = 0;
+		for(_ in keys()) s++;
+		return s;
 	}
 }
 

@@ -20,7 +20,6 @@
  * DEALINGS IN THE SOFTWARE.
  */
 // standard Haxe types
-
 /**
 	The standard `Void` type. Only `null` values can be of the type `Void`.
 
@@ -60,7 +59,7 @@
 **/
 @:coreType @:notNull @:runtimeValue abstract Int to Float {}
 
-#if (java || cs || hl || cpp)
+#if (java || hl || cpp)
 /**
 	Single-precision IEEE 32bit float (4-byte).
 **/

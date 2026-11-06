@@ -163,6 +163,7 @@ enum abstract JsonBinopKind<T>(String) {
 	var OpInterval;
 	var OpArrow;
 	var OpIn;
+	var OpNullCoal;
 }
 
 typedef JsonBinop<T> = {
@@ -212,6 +213,7 @@ enum abstract JsonVarAccessKind<T>(String) {
 	var AccNever;
 	var AccResolve;
 	var AccCall;
+	var AccPrivateCall;
 	var AccInline;
 	var AccRequire:JsonVarAccessKind<{require:String, message:Null<String>}>;
 	var AccCtor;

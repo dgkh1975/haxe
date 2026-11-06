@@ -1,0 +1,173 @@
+(*
+	The Haxe Compiler
+	Copyright (C) 2005-2019  Haxe Foundation
+
+	This program is free software; you can redistribute it and/or
+	modify it under the terms of the GNU General Public License
+	as published by the Free Software Foundation; either version 2
+	of the License, or (at your option) any later version.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program; if not, write to the Free Software
+	Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ *)
+open Extlib_leftovers
+open Globals
+open Type
+
+type sourcemap = {
+	sources : (string) DynArray.t;
+	sources_hash : (string, int) Hashtbl.t;
+	mappings : Buffer.t;
+
+	mutable source_last_pos : sourcemap_pos;
+	mutable print_comma : bool;
+	mutable output_last_col : int;
+	mutable output_current_col : int;
+	mutable current_expr : sourcemap_pos option;
+}
+
+and sourcemap_pos = {
+	file : int;
+	line : int;
+	col : int;
+}
+
+let encode_mapping smap pos =
+	if smap.print_comma then
+		Buffer.add_char smap.mappings ','
+	else
+		smap.print_comma <- true;
+
+	let base64_vlq number =
+		let encode_digit digit =
+			let chars = [|
+				'A';'B';'C';'D';'E';'F';'G';'H';'I';'J';'K';'L';'M';'N';'O';'P';
+				'Q';'R';'S';'T';'U';'V';'W';'X';'Y';'Z';'a';'b';'c';'d';'e';'f';
+				'g';'h';'i';'j';'k';'l';'m';'n';'o';'p';'q';'r';'s';'t';'u';'v';
+				'w';'x';'y';'z';'0';'1';'2';'3';'4';'5';'6';'7';'8';'9';'+';'/'
+			|] in
+			Array.unsafe_get chars digit
+		in
+		let to_vlq number =
+			if number < 0 then
+				((-number) lsl 1) + 1
+			else
+				number lsl 1
+		in
+		let rec loop vlq =
+			let shift = 5 in
+			let base = 1 lsl shift in
+			let mask = base - 1 in
+			let continuation_bit = base in
+			let digit = vlq land mask in
+			let next = vlq asr shift in
+			Buffer.add_char smap.mappings (encode_digit (
+				if next > 0 then digit lor continuation_bit else digit));
+			if next > 0 then loop next else ()
+		in
+		loop (to_vlq number)
+	in
+
+	base64_vlq (smap.output_current_col - smap.output_last_col);
+	base64_vlq (pos.file - smap.source_last_pos.file);
+	base64_vlq (pos.line - smap.source_last_pos.line);
+	base64_vlq (pos.col - smap.source_last_pos.col);
+
+	smap.source_last_pos <- pos;
+	smap.output_last_col <- smap.output_current_col
+
+let noop () = ()
+
+let add_mapping smap pos =
+	if pos.pmin < 0 then noop else
+
+	let file = try
+		Hashtbl.find smap.sources_hash pos.pfile
+	with Not_found ->
+		let length = DynArray.length smap.sources in
+		Hashtbl.replace smap.sources_hash pos.pfile length;
+		DynArray.add smap.sources pos.pfile;
+		length
+	in
+
+	let pos =
+		let line, col = Lexer.find_pos pos in
+		let line = line - 1 in
+		{ file = file; line = line; col = col }
+	in
+
+	if smap.source_last_pos <> pos then begin
+		let old_current_expr = smap.current_expr in
+		smap.current_expr <- Some pos;
+		encode_mapping smap pos;
+		(fun () -> smap.current_expr <- old_current_expr)
+	end else
+		noop
+
+let add_mapping smap e =
+	Option.map_default (fun smap -> add_mapping smap e.epos) noop smap
+
+let handle_newlines smap str =
+	Option.may (fun smap ->
+		let rec loop from =
+			try begin
+				let next = String.index_from str from '\n' + 1 in
+				Buffer.add_char smap.mappings ';';
+				smap.output_last_col <- 0;
+				smap.output_current_col <- 0;
+				smap.print_comma <- false;
+				Option.may (encode_mapping smap) smap.current_expr;
+				loop next
+			end with Not_found ->
+				smap.output_current_col <- smap.output_current_col + (String.length str - from);
+		in
+		loop 0
+	) smap
+
+(* The source map as JSON text. *)
+let mappings_json (com : Gctx.t) smap source_path_prefix =
+	let basefile = Filename.basename com.file in
+	let b = Buffer.create 1024 in
+	let sources = DynArray.to_list smap.sources in
+	let to_url file =
+		ExtString.String.map (fun c -> if c == '\\' then '/' else c) (Path.get_full_path file)
+	in
+	Buffer.add_string b "{\n";
+	Buffer.add_string b "\"version\":3,\n";
+	Buffer.add_string b ("\"file\":\"" ^ (String.concat "\\\\" (ExtString.String.nsplit basefile "\\")) ^ "\",\n");
+	Buffer.add_string b ("\"sourceRoot\":\"\",\n");
+	Buffer.add_string b ("\"sources\":[" ^
+		(String.concat "," (List.map (fun s -> "\"" ^ source_path_prefix ^ to_url s ^ "\"") sources)) ^
+		"],\n");
+	if Gctx.defined com Define.SourceMapContent then begin
+		Buffer.add_string b ("\"sourcesContent\":[" ^
+			(String.concat "," (List.map (fun s -> try "\"" ^ StringHelper.s_escape (Std.input_file ~bin:true s) ^ "\"" with _ -> "null") sources)) ^
+			"],\n");
+	end;
+	Buffer.add_string b "\"names\":[],\n";
+	Buffer.add_string b "\"mappings\":\"";
+	Buffer.add_string b (Buffer.sub smap.mappings 0 (Buffer.length smap.mappings));
+	Buffer.add_string b "\"\n";
+	Buffer.add_string b "}";
+	Buffer.contents b
+
+(* The source map, written next to the output as [<output>.map]. *)
+let write_mappings (com : Gctx.t) smap source_path_prefix =
+	let channel = open_out_bin (com.file ^ ".map") in
+	output_string channel (mappings_json com smap source_path_prefix);
+	close_out channel
+
+(* The source map as a data: URL, for a [sourceMappingURL] comment: base64, padded. *)
+let mappings_data_url (com : Gctx.t) smap source_path_prefix =
+	let json = mappings_json com smap source_path_prefix in
+	let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" in
+	let tbl = Array.init (String.length chars) (fun i -> String.get chars i) in
+	let encoded = Bytes.unsafe_to_string (Base64.str_encode ~tbl json) in
+	let padding = (4 - String.length encoded mod 4) mod 4 in
+	"data:application/json;charset=utf-8;base64," ^ encoded ^ String.make padding '='

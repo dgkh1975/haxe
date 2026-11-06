@@ -21,8 +21,6 @@ Haxe allows you to compile for the following targets:
 
  * JavaScript
  * C++
- * C#
- * Java
  * JVM
  * Lua
  * PHP 7
@@ -44,7 +42,7 @@ The Haxe project has several licenses, covering different parts of the projects.
  * The Haxe standard library is released under the MIT license.
  * The Neko virtual machine is released under the MIT license. Its bundled runtime libraries (ndll) and tools are released under open source licenses as described in https://github.com/HaxeFoundation/neko/blob/master/LICENSE
 
-For the complete Haxe licenses, please see https://haxe.org/foundation/open-source.html or [extra/LICENSE.txt](extra/LICENSE.txt).
+For the complete Haxe licenses, please see https://haxe.org/foundation/open-source.html or [./LICENSE](./LICENSE).
 
 ## Installing Haxe
 
@@ -82,9 +80,8 @@ You can get help and talk with fellow Haxers from around the world via:
  * [Haxe on Stack Overflow](https://stackoverflow.com/questions/tagged/haxe)
  * [Haxe Gitter chatroom](https://gitter.im/HaxeFoundation/haxe/)
  * [Haxe Discord server](https://discordapp.com/invite/0uEuWH3spjck73Lo)
- * [#haxe on Twitter](https://twitter.com/hashtag/haxe?src=hash)
 
-:+1: Get notified of the latest Haxe news, follow us on [Twitter](https://twitter.com/haxelang), [Facebook](https://www.facebook.com/haxe.org) and don't forget to read the [Haxe roundups](https://haxe.io/).
+:+1: Get notified of the latest Haxe news, don't forget to read the [Haxe roundups](https://haxe.io/).
 
 ## Version compatibility
 
@@ -99,4 +96,8 @@ Haxe            | Neko  | SWF   | Python | HL   | PHP  | Lua |
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for more. Thank you!
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on filing issues.
+
+For running and writing tests, see [tests/unit/README.md](tests/unit/README.md).
+
+Thank you!

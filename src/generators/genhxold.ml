@@ -104,8 +104,10 @@ let generate_type com t =
 			"{" ^ String.concat ", " fields ^ "}"
 		| TLazy f ->
 			stype (lazy_type f)
-		| TDynamic t2 ->
-			if t == t2 then "Dynamic" else "Dynamic<" ^ stype t2 ^ ">"
+		| TDynamic None ->
+			"Dynamic"
+		| TDynamic (Some t2) ->
+			"Dynamic<" ^ stype t2 ^ ">"
 		| TFun ([],ret) ->
 			"() -> " ^ ftype ret
 		| TFun (args,ret) ->
@@ -133,7 +135,8 @@ let generate_type com t =
 			else
 				(* we have not found a default value stored in metadata, let's generate it *)
 				n ^ " : " ^ stype t ^ " = " ^ (match follow t with
-					| TAbstract ({ a_path = [],("Int"|"Float"|"UInt") },_) -> "0"
+					| TAbstract ({ a_path = [],("Int"|"Float"|"UInt") },_)
+					| TAbstract ({ a_path = ["haxe"],"UInt32" },_) -> "0"
 					| TAbstract ({ a_path = [],"Bool" },_) -> "false"
 					| _ -> "null")
 		| Some v ->
@@ -142,7 +145,7 @@ let generate_type com t =
 	let print_meta ml =
 		List.iter (fun (m,pl,_) ->
 			match m with
-			| Meta.DefParam | Meta.CoreApi | Meta.Used | Meta.MaybeUsed | Meta.FlatEnum | Meta.Value | Meta.DirectlyUsed | Meta.Enum -> ()
+			| Meta.DefParam | Meta.CoreApi | Meta.Used | Meta.FlatEnum | Meta.Value | Meta.DirectlyUsed | Meta.Enum -> ()
 			| _ ->
 			match pl with
 			| [] -> p "@%s " (Meta.to_string m)
@@ -180,14 +183,14 @@ let generate_type com t =
 							| [] -> Ident "null"
 							| (Meta.DefParam,[(EConst (String(p,_)),_);(EConst v,_)],_) :: _ when p = a ->
 								(match v with
-								| Float "1.#QNAN" -> Float "0./*NaN*/"
-								| Float "4294967295." -> Int "0xFFFFFFFF"
-								| Int "16777215" -> Int "0xFFFFFF"
-								| Float x ->
+								| Float ("1.#QNAN", _) -> Float ("0./*NaN*/", None)
+								| Float ("4294967295.", _) -> Int ("0xFFFFFFFF", None)
+								| Int ("16777215", _) -> Int ("0xFFFFFF", None)
+								| Float (x, _) ->
 									(try
 										let f = float_of_string x in
 										let s = string_of_int (int_of_float f) in
-										if s ^ "." = x then Int s else v
+										if s ^ "." = x then Int (s, None) else v
 									with _ ->
 										v)
 								| _ -> v)
@@ -198,7 +201,7 @@ let generate_type com t =
 				| _ ->
 					die "" __LOC__
 			) in
-			let tparams = (match f.cf_params with [] -> "" | l -> "<" ^ String.concat "," (List.map fst l) ^ ">") in
+			let tparams = (match f.cf_params with [] -> "" | l -> "<" ^ String.concat "," (List.map extract_param_name l) ^ ">") in
 			p "function %s%s(%s) : %s" name tparams (String.concat ", " (List.map sparam params)) (stype ret);
 		);
 		p ";\n";
@@ -208,7 +211,7 @@ let generate_type com t =
 	| TClassDecl c ->
 		print_meta c.cl_meta;
 		let finalmod = if (has_class_flag c CFinal) then "final " else "" in
-		p "extern %s%s %s" finalmod (if (has_class_flag c CInterface) then "interface" else "class") (stype (TInst (c,List.map snd c.cl_params)));
+		p "extern %s%s %s" finalmod (if (has_class_flag c CInterface) then "interface" else "class") (stype (TInst (c,extract_param_types c.cl_params)));
 		let ext = (match c.cl_super with
 		| None -> []
 		| Some (c,pl) -> [" extends " ^ stype (TInst (c,pl))]
@@ -249,7 +252,7 @@ let generate_type com t =
 		p "}\n";
 	| TEnumDecl e ->
 		print_meta e.e_meta;
-		p "extern enum %s {\n" (stype (TEnum(e,List.map snd e.e_params)));
+		p "extern enum %s {\n" (stype (TEnum(e,extract_param_types e.e_params)));
 		List.iter (fun n ->
 			let c = PMap.find n e.e_constrs in
 			p "\t%s" c.ef_name;
@@ -261,7 +264,7 @@ let generate_type com t =
 		p "}\n"
 	| TTypeDecl t ->
 		print_meta t.t_meta;
-		p "typedef %s = " (stype (TType (t,List.map snd t.t_params)));
+		p "typedef %s = " (stype (TType (t,extract_param_types t.t_params)));
 		p "%s" (stype t.t_type);
 		p "\n";
 	| TAbstractDecl a ->
@@ -270,7 +273,7 @@ let generate_type com t =
 		p "extern ";
 		let is_enum = a.a_enum in
 		if is_enum then p "enum ";
-		p "abstract %s" (stype (TAbstract (a,List.map snd a.a_params)));
+		p "abstract %s" (stype (TAbstract (a,extract_param_types a.a_params)));
 		if not (Meta.has Meta.CoreType a.a_meta) then p "(%s)" (stype a.a_this);
 		p " {\n";
 		Option.may (fun c ->

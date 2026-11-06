@@ -231,7 +231,9 @@ class ExampleJSGenerator {
 	public function generate() {
 		print("var $_, $hxClasses = $hxClasses || {}, $estr = function() { return js.Boot.__string_rec(this,''); }");
 		newline();
-		print("function $bind(o,m) { var f = function(){ return f.method.apply(f.scope, arguments); }; f.scope = o; f.method = m; return f; };");
+		print(
+				"function $bind(o,m) { if( m == null ) return null; if( m.__id__ == null ) m.__id__ = $global.$haxeUID++; var f; if( o.hx__closures__ == null ) o.hx__closures__ = {}; else f = o.hx__closures__[m.__id__]; if( f == null ) { f = m.bind(o); o.hx__closures__[m.__id__] = f; } return f; }"
+		);
 		newline();
 		for (t in api.types)
 			genType(t);
@@ -250,7 +252,7 @@ class ExampleJSGenerator {
 		sys.io.File.saveContent(api.outputFile, buf.toString());
 	}
 
-	#if (macro || display)
+	#if macro
 	public static function use() {
 		Compiler.setCustomJSGenerator(function(api) new ExampleJSGenerator(api).generate());
 	}

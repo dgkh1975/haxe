@@ -64,6 +64,7 @@ let declassify = function
 	| CObject -> object_path_sig object_path
 
 class typed_functions = object(self)
+	val signature_mutex = Mutex.create ()
 	val signatures = Hashtbl.create 0
 	val mutable max_arity = 0
 
@@ -80,10 +81,27 @@ class typed_functions = object(self)
 		(cl : signature_classification list)
 		(cr : signature_classification option)
 	=
-		try
+		Mutex.lock signature_mutex;
+		let meth = try
 			Hashtbl.find signatures (cl,cr)
 		with Not_found ->
 			self#do_register_signature cl cr
+		in
+		Mutex.unlock signature_mutex;
+		(* If the method has something that's not java.lang.Object, the next method is one where all arguments are
+		   of type java.lang.Object. *)
+		   if meth.has_nonobject then begin
+			let meth_objects = self#objectify meth in
+			meth.next <- Some meth_objects;
+		(* Otherwise, if the method has a return type that's not java.lang.Object, the next method is one that returns
+		   java.lang.Object. *)
+		end else begin match cr with
+			| Some CObject ->
+				()
+			| _ ->
+				meth.next <- Some (self#get_signature meth.cargs (Some CObject))
+		end;
+		meth
 
 	method private do_register_signature
 		(cl : signature_classification list)
@@ -107,19 +125,6 @@ class typed_functions = object(self)
 		} in
 		if meth.arity > max_arity then max_arity <- meth.arity;
 		Hashtbl.add signatures (meth.cargs,meth.cret) meth;
-		(* If the method has something that's not java.lang.Object, the next method is one where all arguments are
-		   of type java.lang.Object. *)
-		if meth.has_nonobject then begin
-			let meth_objects = self#objectify meth in
-			meth.next <- Some meth_objects;
-		(* Otherwise, if the method has a return type that's not java.lang.Object, the next method is one that returns
-		   java.lang.Object. *)
-		end else begin match cr with
-			| Some CObject ->
-				()
-			| _ ->
-				meth.next <- Some (self#get_signature meth.cargs (Some CObject))
-		end;
 		meth
 
 	method make_forward_method_jsig
@@ -178,7 +183,7 @@ class typed_functions = object(self)
 		jm#finalize_arguments;
 		load();
 		jm#get_code#arraylength array_sig;
-		let cases = ExtList.List.init max_arity (fun i ->
+		let cases = ExtList.List.init (max_arity + 1) (fun i ->
 			[Int32.of_int i],(fun () ->
 				jm#load_this;
 				let args = ExtList.List.init i (fun index ->
@@ -281,11 +286,19 @@ class typed_functions = object(self)
 end
 
 type typed_function_kind =
-	| FuncLocal
+	| FuncLocal of string option
 	| FuncMember of jpath * string
 	| FuncStatic of jpath * string
 
-module JavaFunctionalInterfaces = struct
+(* A typed_function lives either as an inner class of its caller (THostInner
+   — the default for locals and most member/static cases) or as a standalone
+   top-level class at a caller-independent path (THostStandalone — used by
+   the shared field-closure pool, see gctx.closure_paths in genjvm.ml). *)
+type typed_function_host =
+	| THostInner of JvmClass.builder
+	| THostStandalone of jpath
+
+module JavaFunctionalInterface = struct
 	type t = {
 		jargs: jsignature list;
 		jret : jsignature option;
@@ -294,102 +307,60 @@ module JavaFunctionalInterfaces = struct
 		jparams : string list;
 	}
 
-	let java_functional_interfaces =
-		let juf = ["java";"util";"function"] in
-		let tp name = TTypeParameter name in
-		[
-			{
-				jargs = [];
-				jret = None;
-				jpath = ["java";"lang"],"Runnable";
-				jname = "run";
-				jparams = []
-			};
-			{
-				jargs = [tp "T"];
-				jret = None;
-				jpath = juf,"Consumer";
-				jname = "accept";
-				jparams = ["T"]
-			};
-			{
-				jargs = [tp "T";tp "U"];
-				jret = None;
-				jpath = juf,"BiConsumer";
-				jname = "accept";
-				jparams = ["T";"U"]
-			};
-			{
-				jargs = [tp "T"];
-				jret = Some (tp "R");
-				jpath = juf,"Function";
-				jname = "apply";
-				jparams = ["T";"R"]
-			};
-		]
+	let string_of_functional_interface jfi = TPrinting.Printer.s_record_fields "" [
+		"jargs",String.concat ", " (List.map (generate_signature true) jfi.jargs);
+		"jret",Option.map_default (generate_signature true) "None" jfi.jret;
+		"jpath",Globals.s_type_path jfi.jpath;
+		"jname",jfi.jname;
+		"jparams",String.concat ", " jfi.jparams;
+	]
 
-	let unify jfi args ret =
-		let rec loop params want have = match want,have with
-			| [],[] ->
-				Some (jfi,List.map (fun s -> TType(WNone,List.assoc s params)) jfi.jparams)
-			| want1 :: want,have1 :: have ->
-				begin match want1 with
-				| TTypeParameter n ->
-					let have1 = get_boxed_type have1 in
-					loop ((n,have1) :: params) want have
-				| _ ->
-					if have1 <> want1 then None
-					else loop params want have
-				end
-			| _ ->
-				None
-		in
-		match jfi.jret,ret with
-		| None,None ->
-			loop [] jfi.jargs args
-		| Some (TTypeParameter n),Some jsig ->
-			let jsig = get_boxed_type jsig in
-			loop [n,jsig] jfi.jargs args
-		| Some jsig1,Some jsig2 ->
-			if jsig1 <> jsig2 then None
-			else loop [] jfi.jargs args
-		| _ ->
-			None
-
-
-	let find_compatible args ret =
-		ExtList.List.filter_map (fun jfi ->
-			if jfi.jparams = [] then begin
-				if jfi.jargs = args && jfi.jret = ret then
-					Some (jfi,[])
-				else None
-			end else
-				unify jfi args ret
-		) java_functional_interfaces
+	let create args ret path name params =
+		let jfi = {
+			jargs = args;
+			jret = ret;
+			jpath = path;
+			jname = name;
+			jparams = params;
+		} in
+		jfi
 end
 
-open JavaFunctionalInterfaces
 open JvmGlobals
 
 class typed_function
 	(functions : typed_functions)
 	(kind : typed_function_kind)
-	(host_class : JvmClass.builder)
+	(host : typed_function_host)
 	(host_method : JvmMethod.builder)
 	(context : (string * jsignature) list)
 
 = object(self)
 
+	val mutable functional_interfaces = []
+
 	val jc_closure =
-		let name = match kind with
-			| FuncLocal ->
-				Printf.sprintf "Closure_%s_%i" (patch_name host_method#get_name) host_method#get_next_closure_id
-			| FuncStatic(path,name) ->
-				Printf.sprintf "%s_%s" (snd path) (patch_name name)
-			| FuncMember(path,name) ->
-				Printf.sprintf "%s_%s" (snd path) (patch_name name)
+		let jc = match host with
+			| THostInner host_class ->
+				let name = match kind with
+					| FuncLocal s ->
+						let name = patch_name host_method#get_name in
+						let name = match s with
+							| None -> name
+							| Some s -> name ^ "_" ^ s
+						in
+						Printf.sprintf "Closure_%s_%i" name (host_class#get_next_closure_id name)
+					| FuncStatic(path,name) | FuncMember(path,name) ->
+						let prefix = match fst path with [] -> snd path | pkg -> String.concat "_" pkg ^ "_" ^ snd path in
+						Printf.sprintf "%s_%s" prefix (patch_name name)
+				in
+				host_class#spawn_inner_class None haxe_function_path (Some name)
+			| THostStandalone path ->
+				let jc = new JvmClass.builder path haxe_function_path in
+				jc#add_access_flag 0x01; (* public *)
+				jc
 		in
-		let jc = host_class#spawn_inner_class None haxe_function_path (Some name) in
+		jc#add_typed_function jc#get_this_path;
 		jc#add_access_flag 0x10; (* final *)
 		jc
 
@@ -406,7 +377,11 @@ class typed_function
 		jm_ctor#return;
 		jm_ctor
 
-	method generate_invoke (args : (string * jsignature) list) (ret : jsignature option)=
+	method add_functional_interface (jfi : JavaFunctionalInterface.t) (params : jsignature list) =
+		let params = List.map (fun jsig -> TType(WNone,jsig)) params in
+		functional_interfaces <- (jfi,params) :: functional_interfaces
+
+	method generate_invoke (args : (string * jsignature) list) (ret : jsignature option) (functional_interface_filter : jpath list) =
 		let arg_sigs = List.map snd args in
 		let meth = functions#register_signature arg_sigs ret in
 		let jsig_invoke = method_sig arg_sigs ret in
@@ -418,24 +393,36 @@ class typed_function
 				Hashtbl.add implemented_interfaces path true;
 			end
 		in
-		let spawn_forward_function meth_from meth_to is_bridge =
+		let spawn_invoke_next name msig is_bridge =
 			let flags = [MPublic] in
 			let flags = if is_bridge then MBridge :: MSynthetic :: flags else flags in
-			let jm_invoke_next = jc_closure#spawn_method meth_from.name (method_sig meth_from.dargs meth_from.dret) flags in
-			functions#make_forward_method jc_closure jm_invoke_next meth_from meth_to;
+			jc_closure#spawn_method name msig flags
 		in
-		let check_functional_interfaces meth =
-			try
-				let l = JavaFunctionalInterfaces.find_compatible meth.dargs meth.dret in
-				List.iter (fun (jfi,params) ->
-					add_interface jfi.jpath params;
-					spawn_forward_function {meth with name=jfi.jname} meth false;
-				) l
-			with Not_found ->
-				()
+		let spawn_forward_function meth_from meth_to is_bridge =
+			let msig = method_sig meth_from.dargs meth_from.dret in
+			if not (jc_closure#has_method meth_from.name msig) then begin
+				let jm_invoke_next = spawn_invoke_next meth_from.name msig is_bridge in
+				functions#make_forward_method jc_closure jm_invoke_next meth_from meth_to;
+			end
 		in
+		let open JavaFunctionalInterface in
+		List.iter (fun (jfi,params) ->
+			add_interface jfi.jpath params;
+			let msig = method_sig jfi.jargs jfi.jret in
+			if not (jc_closure#has_method jfi.jname msig) then begin
+				let jm_invoke_next = spawn_invoke_next jfi.jname msig false in
+				(* Forward to the typed invoke (arg_sigs, ret) rather than the
+				   Object-declassified (meth.dargs, meth.dret). When the FI's
+				   own method is also named "invoke" with an erased Object
+				   return (Function0<T>, Callable<V>, …), forwarding to
+				   meth.dret would emit `invokevirtual invoke()Object` against
+				   this very bridge and self-recurse — the later loop that
+				   would have synthesized the Object→typed bridge is then
+				   short-circuited by has_method. *)
+				functions#make_forward_method_jsig jc_closure jm_invoke_next meth.name jfi.jargs jfi.jret arg_sigs ret
+			end
+		) functional_interfaces;
 		let rec loop meth =
-			check_functional_interfaces meth;
 			begin match meth.next with
 			| Some meth_next ->
 				spawn_forward_function meth_next meth true;

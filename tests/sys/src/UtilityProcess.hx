@@ -1,5 +1,5 @@
 /**
-	Used by TestUnicode.
+	Used by TestUnicode and TestSys.
 	Runs a given simple program based on the first argument.
  */
 
@@ -9,17 +9,21 @@ import sys.io.Process;
 class UtilityProcess {
 	public static var BIN_PATH =
 #if cpp
+	#if cppia
+		Path.join(["bin", "cppia"]);
+	#else
 		Path.join(["bin", "cpp"]);
-#elseif cs
-		Path.join(["bin", "cs", "bin"]);
+	#end
 #elseif hl
+	#if hlc
+		Path.join(["bin", "hlc/utilityProcess"]);
+	#else
 		Path.join(["bin", "hl"]);
+	#end
 #elseif lua
 		Path.join(["bin", "lua"]);
 #elseif jvm
 		Path.join(["bin", "jvm"]);
-#elseif java
-		Path.join(["bin", "java"]);
 #elseif neko
 		Path.join(["bin", "neko"]);
 #elseif php
@@ -27,35 +31,31 @@ class UtilityProcess {
 #elseif python
 		Path.join(["bin", "python"]);
 #elseif eval
-		Path.join(["src"]);
+		Path.join(["bin", "eval"]);
+#elseif js
+		Path.join(["bin", "js"]);
 #else
 		null;
 #end
 	public static var BIN_NAME =
 #if cpp
-		#if debug
+		#if cppia
+			"UtilityProcess.cppia";
+		#elseif debug
 			"UtilityProcess-debug";
 		#else
 			"UtilityProcess";
 		#end
-#elseif cs
-		#if debug
-			"UtilityProcess-Debug.exe";
-		#else
-			"UtilityProcess.exe";
-		#end
 #elseif hl
+	#if hlc
+		"UtilityProcess.exe";
+	#else
 		"UtilityProcess.hl";
+	#end
 #elseif lua
 		"UtilityProcess.lua";
 #elseif jvm
 		"UtilityProcess.jar";
-#elseif java
-		#if debug
-			"UtilityProcess-Debug.jar";
-		#else
-			"UtilityProcess.jar";
-		#end
 #elseif neko
 		"UtilityProcess.n";
 #elseif php
@@ -63,32 +63,26 @@ class UtilityProcess {
 #elseif python
 		"UtilityProcess.py";
 #elseif eval
-		"UtilityProcess.hx";
+		"UtilityProcess.hxb";
+#elseif js
+		"UtilityProcess.js";
 #else
 		null;
 #end
 
-	public static function runUtility(args:Array<String>, ?options:{?stdin:String, ?execPath:String, ?execName:String}):{
+	public static function runUtility(args:Array<String>, ?stdin:String):{
 		exitCode:Int,
 		stdout:String,
 		stderr:String
 	} {
-		if (options == null) options = {};
-		if (options.execPath == null) options.execPath = BIN_PATH;
-		if (options.execName == null) options.execName = BIN_NAME;
-		var execFull = Path.join([options.execPath, options.execName]);
+		var execFull = Path.join([BIN_PATH, BIN_NAME]);
 		var proc =
 		#if (macro || interp)
-		new Process("haxe", ["compile-each.hxml", "-p", options.execPath, "--run", options.execName].concat(args));
+		new Process("haxe", ["--hxb-lib", execFull, "--run", Path.withoutExtension(BIN_NAME)].concat(args));
+		#elseif cppia
+		new Process("haxelib", ["run", "hxcpp", execFull].concat(args).concat(Sys.getEnv("CPPIA_IS_JIT") == null ? [] : ["-jit"]));
 		#elseif cpp
 		new Process(execFull, args);
-		#elseif cs
-		(switch (Sys.systemName()) {
-			case "Windows":
-				new Process(execFull, args);
-			case _:
-				new Process("mono", [execFull].concat(args));
-		});
 		#elseif java
 		new Process(Path.join([java.lang.System.getProperty("java.home"), "bin", "java"]), ["-jar", execFull].concat(args));
 		#elseif python
@@ -96,7 +90,11 @@ class UtilityProcess {
 		#elseif neko
 		new Process("neko", [execFull].concat(args));
 		#elseif hl
-		new Process("hl", [execFull].concat(args));
+			#if hlc
+			new Process(execFull, args);
+			#else
+			new Process("hl", [execFull].concat(args));
+			#end
 		#elseif php
 		new Process(php.Global.defined('PHP_BINARY') ? php.Const.PHP_BINARY : 'php', [execFull].concat(args));
 		#elseif lua
@@ -104,8 +102,8 @@ class UtilityProcess {
 		#else
 		null;
 		#end
-		if (options.stdin != null) {
-			proc.stdin.writeString(options.stdin);
+		if (stdin != null) {
+			proc.stdin.writeString(stdin);
 			proc.stdin.flush();
 		}
 		var exitCode = proc.exitCode();
@@ -118,22 +116,64 @@ class UtilityProcess {
 			stderr: stderr
 		};
 	}
-	
+
+	/** Runs the utility program via Sys.command rather than as a separate process,
+		for compatiblity with hxnodejs.
+
+		Returns the exit code of the command.
+	 **/
+	public static function runUtilityAsCommand(args:Array<String>):Int {
+		final execFull = Path.join([BIN_PATH, BIN_NAME]);
+		final exitCode =
+		#if (macro || interp)
+		Sys.command("haxe", ["--hxb-lib", execFull, "--run", BIN_NAME.substr(0, -4)].concat(args));
+		#elseif cppia
+		Sys.command("haxelib", ["run", "hxcpp", execFull].concat(args).concat(Sys.getEnv("CPPIA_IS_JIT") == null ? [] : ["-jit"]));
+		#elseif cpp
+		Sys.command(execFull, args);
+		#elseif java
+		Sys.command(Path.join([java.lang.System.getProperty("java.home"), "bin", "java"]), ["-jar", execFull].concat(args));
+		#elseif python
+		Sys.command(python.lib.Sys.executable, [execFull].concat(args));
+		#elseif neko
+		Sys.command("neko", [execFull].concat(args));
+		#elseif hl
+		Sys.command("hl", [execFull].concat(args));
+		#elseif php
+		Sys.command(php.Global.defined('PHP_BINARY') ? php.Const.PHP_BINARY : 'php', [execFull].concat(args));
+		#elseif lua
+		Sys.command("lua", [execFull].concat(args));
+		#elseif js
+		Sys.command("node", [execFull].concat(args));
+		#else
+		1;
+		#end
+
+		return exitCode;
+	}
+
 	public static function main():Void {
-		var args = Sys.args();
-		function sequenceIndex(d:String, mode:String):String return (switch (UnicodeSequences.valid[Std.parseInt(d)]) {
+		final args = Sys.args();
+		#if cppia
+		args.shift();
+		args.remove("-jit");
+		#end
+		function sequenceIndex(d:String, mode:String):String
+			return switch UnicodeSequences.valid[Std.parseInt(d)] {
 				case Only(ref): UnicodeSequences.codepointsToString(ref);
 				case Normal(nfc, nfd): UnicodeSequences.codepointsToString(mode == "nfc" ? nfc : nfd);
-			});
+			};
 		switch (args) {
 			case _.slice(0, 1) => ["putEnv"]:
-			// ["putEnv", var name, index, nfc mode, next args...]
-			Sys.putEnv(args[1], sequenceIndex(args[2], args[3]));
-			var out = runUtility(args.slice(4));
-			Sys.print(out.stdout);
-			Sys.exit(out.exitCode);
+				// ["putEnv", var name, index, nfc mode, next args...]
+				Sys.putEnv(args[1], sequenceIndex(args[2], args[3]));
+				var out = runUtility(args.slice(4));
+				Sys.print(out.stdout);
+				Sys.exit(out.exitCode);
 			case ["getCwd"]: Sys.println(Sys.getCwd());
 			case ["getEnv", name]: Sys.println(Sys.getEnv(name));
+			case ["checkEnv", name, value]:
+				Sys.exit(value == Sys.getEnv(name) ? 0 : 1);
 			case ["environment", name]: Sys.println(Sys.environment().get(name));
 			case ["exitCode", Std.parseInt(_) => code]: Sys.exit(code);
 			case ["args", data]: Sys.println(data);
@@ -144,9 +184,9 @@ class UtilityProcess {
 			case ["stdin.readString", Std.parseInt(_) => len]: Sys.println(Sys.stdin().readString(len, UTF8));
 			case ["stdin.readUntil", Std.parseInt(_) => end]: Sys.println(Sys.stdin().readUntil(end));
 			case ["stderr.writeString", d, mode]:
-			var stream = Sys.stderr(); stream.writeString(sequenceIndex(d, mode)); stream.flush();
+				var stream = Sys.stderr(); stream.writeString(sequenceIndex(d, mode)); stream.flush();
 			case ["stdout.writeString", d, mode]:
-			var stream = Sys.stdout(); stream.writeString(sequenceIndex(d, mode)); stream.flush();
+				var stream = Sys.stdout(); stream.writeString(sequenceIndex(d, mode)); stream.flush();
 			case ["programPath"]: Sys.println(Sys.programPath());
 			case _: // no-op
 		}

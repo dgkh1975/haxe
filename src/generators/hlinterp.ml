@@ -113,7 +113,6 @@ type context = {
 	mutable fcall : vfunction -> value list -> value;
 	mutable code : code;
 	mutable on_error : value -> (fundecl * int ref) list -> unit;
-	mutable resolve_macro_api : string -> (value list -> value) option;
 	checked : bool;
 	cached_protos : (int, vproto * ttype array * (int * (value -> value)) list) Hashtbl.t;
 	cached_strings : (int, string) Hashtbl.t;
@@ -121,11 +120,14 @@ type context = {
 }
 
 let default t =
-	match t with
-	| HUI8 | HUI16 | HI32 -> VInt Int32.zero
-	| HI64 -> VInt64 Int64.zero
-	| HF32 | HF64 -> VFloat 0.
-	| HBool -> VBool false
+	match get_group t with
+	| GInt ->
+		if type_size_bits t <= 2 then
+			VInt Int32.zero
+		else
+			VInt64 Int64.zero
+	| GFloat -> VFloat 0.
+	| GBool -> VBool false
 	| _ -> if is_nullable t then VNull else VUndef
 
 let get_type = function
@@ -133,7 +135,7 @@ let get_type = function
 	| VObj o -> Some (HObj o.oproto.pclass)
 	| VDynObj _ -> Some HDynObj
 	| VVirtual v -> Some (HVirtual v.vtype)
-	| VArray _ -> Some HArray
+	| VArray (_,t) -> Some (HArray t)
 	| VClosure (f,None) -> Some (match f with FFun f -> f.ftype | FNativeFun (_,_,t) -> t)
 	| VClosure (f,Some _) -> Some (match f with FFun { ftype = HFun(_::args,ret) } | FNativeFun (_,_,HFun(_::args,ret)) -> HFun (args,ret) | _ -> Globals.die "" __LOC__)
 	| VVarArgs _ -> Some (HFun ([],HDyn))
@@ -145,27 +147,27 @@ let v_dynamic = function
 	| _ -> false
 
 let rec is_compatible v t =
-	match v, t with
-	| VInt _, (HUI8 | HUI16 | HI32) -> true
-	| VInt64 _, HI64 -> true
-	| VFloat _, (HF32 | HF64) -> true
-	| VBool _, HBool -> true
-	| _, HVoid -> true
-	| VNull, t -> is_nullable t
-	| VObj o, HObj _ -> safe_cast (HObj o.oproto.pclass) t
-	| VClosure _, HFun _ -> safe_cast (match get_type v with None -> Globals.die "" __LOC__ | Some t -> t) t
-	| VBytes _, HBytes -> true
-	| VDyn (_,t1), HNull t2 -> tsame t1 t2
-	| v, HNull t -> is_compatible v t
-	| v, HDyn -> v_dynamic v
-	| VType _, HType -> true
-	| VArray _, HArray -> true
-	| VDynObj _, HDynObj -> true
-	| VVirtual v, HVirtual _ -> safe_cast (HVirtual v.vtype) t
-	| VRef (_,t1), HRef t2 -> tsame t1 t2
-	| VAbstract _, HAbstract _ -> true
-	| VEnum _, HEnum _ -> true
-	| VStruct v, HStruct _ -> safe_cast (HStruct v.oproto.pclass) t
+	match v, get_group t, t with
+	| VInt _, GInt, _ -> type_size_bits t <= 2
+	| VInt64 _, GInt, _ -> type_size_bits t == 3
+	| VFloat _, GFloat, _ -> true
+	| VBool _, GBool, _ -> true
+	| _, _, HVoid -> true
+	| VNull, _, _ -> is_nullable t
+	| VObj o, _, HObj _ -> safe_cast (HObj o.oproto.pclass) t
+	| VClosure _, _, HFun _ -> safe_cast (match get_type v with None -> Globals.die "" __LOC__ | Some t -> t) t
+	| VBytes _, _, HBytes -> true
+	| VDyn (_,t1), _, HNull ti -> tsame t1 ti
+	| v, _, HNull ti -> is_compatible v ti
+	| v, _, HDyn -> v_dynamic v
+	| VType _, _, HType -> true
+	| VArray _, _, HArray _ -> true
+	| VDynObj _, _, HDynObj -> true
+	| VVirtual v, _, HVirtual _ -> safe_cast (HVirtual v.vtype) t
+	| VRef (_,t1), _, HRef t2 -> tsame t1 t2
+	| VAbstract _, _, HAbstract _ -> true
+	| VEnum _, _, HEnum _ -> true
+	| VStruct v, _, HStruct _ -> safe_cast (HStruct v.oproto.pclass) t
 	| _ -> false
 
 type cast =
@@ -293,7 +295,7 @@ let fstr = function
 	| FFun f -> "function@" ^ string_of_int f.findex
 	| FNativeFun (s,_,_) -> "native[" ^ s ^ "]"
 
-let caml_to_hl str = Common.utf8_to_utf16 str true
+let caml_to_hl str = StringHelper.utf8_to_utf16 str true
 
 let hash ctx str =
 	let h = hl_hash str in
@@ -318,7 +320,7 @@ let utf16_iter f s =
 	loop 0
 
 let utf16_char buf c =
-	Common.utf16_add buf (int_of_char c)
+	StringHelper.utf16_add buf (int_of_char c)
 
 let hl_to_caml str =
 	let utf16_eof s =
@@ -527,7 +529,7 @@ and dyn_call ctx v args tret =
 		null_access()
 	| VVarArgs (f,a) ->
 		let arr = VArray (Array.of_list (List.map (fun (v,t) -> make_dyn v t) args),HDyn) in
-		dyn_call ctx (VClosure (f,a)) [arr,HArray] tret
+		dyn_call ctx (VClosure (f,a)) [arr,HArray HDyn] tret
 	| _ ->
 		throw_msg ctx (vstr_d ctx v ^ " cannot be called")
 
@@ -667,7 +669,7 @@ let rec dyn_set_field ctx obj field v vt =
 
 let make_stack ctx (f,pos) =
 	let pos = !pos - 1 in
-	try let fid, line = f.debug.(pos) in ctx.code.debugfiles.(fid), line with _ -> "???", 0
+	try let fid, line, _ = f.debug.(pos) in ctx.code.debugfiles.(fid), line with _ -> "???", 0
 
 let stack_frame ctx (f,pos) =
 	let file, line = make_stack ctx (f,pos) in
@@ -1074,7 +1076,7 @@ let interp ctx f args =
 					| HDyn -> 9
 					| HFun _ -> 10
 					| HObj _ -> 11
-					| HArray -> 12
+					| HArray _ -> 12
 					| HType -> 13
 					| HRef _ -> 14
 					| HVirtual _ -> 15
@@ -1083,7 +1085,9 @@ let interp ctx f args =
 					| HEnum _ -> 18
 					| HNull _ -> 19
 					| HMethod _ -> 20
-					| HStruct _ -> 21)))
+					| HStruct _ -> 21
+					| HPacked _ -> 22
+					| HGUID -> 23)))
 				| _ -> Globals.die "" __LOC__);
 		| ORef (r,v) ->
 			set r (VRef (RStack (v + spos),rtype v))
@@ -1110,7 +1114,7 @@ let interp ctx f args =
 			(match rtype r with
 			| HEnum e ->
 				let _, _, fl = e.efields.(f) in
-				let vl = Array.create (Array.length fl) VUndef in
+				let vl = Array.make (Array.length fl) VUndef in
 				set r (VEnum (e, f, vl))
 			| _ -> Globals.die "" __LOC__
 			)
@@ -1153,7 +1157,9 @@ let interp ctx f args =
 			(match get r2, get off with
 			| VRef (RArray (a,pos),t), VInt i -> set r (VRef (RArray (a,pos + Int32.to_int i),t))
 			| _ -> Globals.die "" __LOC__)
-		| ONop _ ->
+		| OAsm _ ->
+			throw_msg ctx "Unsupported ASM"
+		| ONop _ | OPrefetch _ | OCatch _ ->
 			()
 		);
 		loop()
@@ -1256,7 +1262,7 @@ let load_native ctx lib name t =
 			| _ -> Globals.die "" __LOC__)
 		| "alloc_array" ->
 			(function
-			| [VType t;VInt i] -> VArray (Array.create (int i) (default t),t)
+			| [VType t;VInt i] -> VArray (Array.make (int i) (default t),t)
 			| _ -> Globals.die "" __LOC__)
 		| "alloc_obj" ->
 			(function
@@ -1346,7 +1352,7 @@ let load_native ctx lib name t =
 		| "math_asin" -> (function [VFloat f] -> VFloat (asin f) | _ -> Globals.die "" __LOC__)
 		| "math_atan" -> (function [VFloat f] -> VFloat (atan f) | _ -> Globals.die "" __LOC__)
 		| "math_atan2" -> (function [VFloat a; VFloat b] -> VFloat (atan2 a b) | _ -> Globals.die "" __LOC__)
-		| "math_log" -> (function [VFloat f] -> VFloat (Pervasives.log f) | _ -> Globals.die "" __LOC__)
+		| "math_log" -> (function [VFloat f] -> VFloat (Stdlib.log f) | _ -> Globals.die "" __LOC__)
 		| "math_exp" -> (function [VFloat f] -> VFloat (exp f) | _ -> Globals.die "" __LOC__)
 		| "math_pow" -> (function [VFloat a; VFloat b] -> VFloat (a ** b) | _ -> Globals.die "" __LOC__)
 		| "parse_int" ->
@@ -1533,12 +1539,12 @@ let load_native ctx lib name t =
 					(match !cached_sys_name with
 					| Some n -> n
 					| None ->
-						let ic = Unix.open_process_in "uname" in
+						let ic = Unix.open_process_args_in "uname" [| "uname" |] in
 						let uname = (match input_line ic with
 							| "Darwin" -> "Mac"
 							| n -> n
 						) in
-						close_in ic;
+						Stdlib.ignore (Unix.close_process_in ic);
 						cached_sys_name := Some uname;
 						uname)
 				| "Win32" | "Cygwin" -> "Windows"
@@ -1774,9 +1780,9 @@ let load_native ctx lib name t =
 						if c >= int_of_char 'a' && c <= int_of_char 'z' then c + int_of_char 'A' - int_of_char 'a'
 						else c
 					in
-					Common.utf16_add buf c
+					StringHelper.utf16_add buf c
 				) (String.sub s (int pos) ((int len) lsl 1));
-				Common.utf16_add buf 0;
+				StringHelper.utf16_add buf 0;
 				VBytes (Buffer.contents buf)
 			| _ -> Globals.die "" __LOC__)
 		| "ucs2_lower" ->
@@ -1788,9 +1794,9 @@ let load_native ctx lib name t =
 						if c >= int_of_char 'A' && c <= int_of_char 'Z' then c + int_of_char 'a' - int_of_char 'A'
 						else c
 					in
-					Common.utf16_add buf c
+					StringHelper.utf16_add buf c
 				) (String.sub s (int pos) ((int len) lsl 1));
-				Common.utf16_add buf 0;
+				StringHelper.utf16_add buf 0;
 				VBytes (Buffer.contents buf)
 			| _ -> Globals.die "" __LOC__)
 		| "url_encode" ->
@@ -1798,8 +1804,8 @@ let load_native ctx lib name t =
 			| [VBytes s; VRef (r, HI32)] ->
 				let s = hl_to_caml s in
 				let buf = Buffer.create 0 in
-				Common.url_encode s (utf16_char buf);
-				Common.utf16_add buf 0;
+				StringHelper.url_encode s (utf16_char buf);
+				StringHelper.utf16_add buf 0;
 				let str = Buffer.contents buf in
 				set_ref r (to_int (String.length str lsr 1 - 1));
 				VBytes str
@@ -2091,10 +2097,6 @@ let load_native ctx lib name t =
 			| _ -> Globals.die "" __LOC__)
 		| _ ->
 			unresolved())
-	| "macro" ->
-		(match ctx.resolve_macro_api name with
-		| None -> unresolved()
-		| Some f -> f)
 	| _ ->
 		unresolved()
 	) in
@@ -2127,7 +2129,6 @@ let create checked =
 		checked = checked;
 		fcall = (fun _ _ -> Globals.die "" __LOC__);
 		on_error = (fun _ _ -> Globals.die "" __LOC__);
-		resolve_macro_api = (fun _ -> None);
 	} in
 	ctx.on_error <- (fun msg stack -> failwith (vstr ctx msg HDyn ^ "\n" ^ String.concat "\n" (List.map (stack_frame ctx) stack)));
 	ctx.fcall <- call_fun ctx;
@@ -2136,9 +2137,6 @@ let create checked =
 let set_error_handler ctx e =
 	ctx.on_error <- e
 
-let set_macro_api ctx f =
-	ctx.resolve_macro_api <- f
-
 let add_code ctx code =
 	(* expand global table *)
 	let globals = Array.map default code.globals in
@@ -2146,7 +2144,7 @@ let add_code ctx code =
 	ctx.t_globals <- globals;
 	(* expand function table *)
 	let nfunctions = Array.length code.functions + Array.length code.natives in
-	let functions = Array.create nfunctions (FNativeFun ("",(fun _ -> Globals.die "" __LOC__),HDyn)) in
+	let functions = Array.make nfunctions (FNativeFun ("",(fun _ -> Globals.die "" __LOC__),HDyn)) in
 	Array.blit ctx.t_functions 0 functions 0 (Array.length ctx.t_functions);
 	let rec loop i =
 		if i = Array.length code.natives then () else
@@ -2189,26 +2187,21 @@ let add_code ctx code =
 
 (* ------------------------------- CHECK ---------------------------------------------- *)
 
-let check code macros =
-	let ftypes = Array.create (Array.length code.natives + Array.length code.functions) HVoid in
+let check comerror code =
+	let ftypes = Array.make (Array.length code.natives + Array.length code.functions) HVoid in
 	let is_native_fun = Hashtbl.create 0 in
 
 	let check_fun f =
 		let pos = ref 0 in
 		let error msg =
-			let dfile, dline = f.debug.(!pos) in
-			let file = code.debugfiles.(dfile) in
+			let _, _, dpos = f.debug.(!pos) in
 			let msg = Printf.sprintf "Check failure at fun@%d @%X - %s" f.findex (!pos) msg in
-			if macros then begin
-				let low = dline land 0xFFFFF in
-				let pos = {
-					Globals.pfile = file;
-					Globals.pmin = low;
-					Globals.pmax = low + (dline lsr 20);
-				} in
-				Common.abort msg pos
-			end else
-				failwith (Printf.sprintf "\n%s:%d: %s" file dline msg)
+			comerror msg dpos;
+			()
+		in
+		let error_fail msg =
+			error msg;
+			failwith msg
 		in
 		let targs, tret = (match f.ftype with HFun (args,ret) -> args, ret | _ -> Globals.die "" __LOC__) in
 		let rtype i = try f.regs.(i) with _ -> HObj { null_proto with pname = "OUT_OF_BOUNDS:" ^ string_of_int i } in
@@ -2222,19 +2215,13 @@ let check code macros =
 			if not (safe_cast (rtype r) t) then error (reg_inf r ^ " should be " ^ tstr t ^ " and not " ^ tstr (rtype r))
 		in
 		let numeric r =
-			match rtype r with
-			| HUI8 | HUI16 | HI32 | HI64 | HF32 | HF64 -> ()
-			| _ -> error (reg_inf r ^ " should be numeric")
+			if not (is_number (rtype r)) then error (reg_inf r ^ " should be numeric")
 		in
 		let int r =
-			match rtype r with
-			| HUI8 | HUI16 | HI32 | HI64 -> ()
-			| _ -> error (reg_inf r ^ " should be integral")
+			if not (is_int (rtype r)) then error (reg_inf r ^ " should be integral")
 		in
 		let float r =
-			match rtype r with
-			| HF32 | HF64 -> ()
-			| _ -> error (reg_inf r ^ " should be float")
+			if not (is_float (rtype r)) then error (reg_inf r ^ " should be float")
 		in
 		let call f args r =
 			match ftypes.(f) with
@@ -2262,7 +2249,7 @@ let check code macros =
 			if not (is_dynamic (rtype r)) then error (reg_inf r ^ " should be castable to dynamic")
 		in
 		let get_field r p fid =
-			try snd (resolve_field p fid) with Not_found -> error (reg_inf r ^ " does not have field " ^ string_of_int fid)
+			try snd (resolve_field p fid) with Not_found -> error_fail (reg_inf r ^ " does not have field " ^ string_of_int fid)
 		in
 		let tfield o fid proto =
 			if fid < 0 then error (reg_inf o ^ " does not have " ^ (if proto then "proto " else "") ^ "field " ^ string_of_int fid);
@@ -2435,7 +2422,7 @@ let check code macros =
 			| ORethrow r ->
 				reg r HDyn
 			| OGetArray (v,a,i) ->
-				reg a HArray;
+				(match rtype a with HAbstract ("hl_carray",_) | HArray _ -> () | _ -> reg a (HArray HDyn));
 				reg i HI32;
 				ignore(rtype v);
 			| OGetUI8 (r,b,p) | OGetUI16(r,b,p) ->
@@ -2443,7 +2430,8 @@ let check code macros =
 				reg b HBytes;
 				reg p HI32;
 			| OGetMem (r,b,p) ->
-				(match rtype r with HI32 | HI64 | HF32 | HF64 -> () | _ -> error (reg_inf r ^ " should be numeric"));
+				let t = rtype r in
+				(match get_group t with (GInt | GFloat) when type_size_bits t >= 2 -> () | _ -> error (reg_inf r ^ " should be numeric"));
 				reg b HBytes;
 				reg p HI32;
 			| OSetUI8 (r,p,v) | OSetUI16 (r,p,v) ->
@@ -2453,19 +2441,16 @@ let check code macros =
 			| OSetMem (r,p,v) ->
 				reg r HBytes;
 				reg p HI32;
-				(match rtype v with HI32 | HI64 | HF32 | HF64 -> () | _ -> error (reg_inf r ^ " should be numeric"));
+				let t = rtype v in
+				(match get_group t with (GInt | GFloat) when type_size_bits t >= 2 -> () | _ -> error (reg_inf r ^ " should be numeric"));
 			| OSetArray (a,i,v) ->
-				reg a HArray;
+				(match rtype a with HAbstract ("hl_carray",_) | HArray _ -> () | _ -> reg a (HArray HDyn));
 				reg i HI32;
 				ignore(rtype v);
-			| OUnsafeCast (a,b) ->
-				is_dyn a;
-				is_dyn b;
-			| OSafeCast (a,b) ->
+			| OUnsafeCast (a,b) | OSafeCast (a,b) ->
 				ignore(rtype a);
 				ignore(rtype b);
 			| OArraySize (r,a) ->
-				reg a HArray;
 				reg r HI32
 			| OType (r,_) ->
 				reg r HType
@@ -2538,13 +2523,23 @@ let check code macros =
 			| OAssert _ ->
 				()
 			| ORefData (r,d) ->
-				reg d HArray;
-				(match rtype r with HRef _ -> () | _ -> reg r (HRef HDyn))
+				(match rtype r with
+					| HRef t ->
+						reg d (HArray t);
+					| _ ->
+						reg d (HArray HDyn);
+						reg r (HRef HDyn))
 			| ORefOffset (r,r2,off) ->
 				(match rtype r2 with HRef _ -> () | _ -> reg r2 (HRef HDyn));
 				reg r (rtype r2);
 				reg off HI32;
 			| ONop _ ->
+				();
+			| OPrefetch (r,f,_) ->
+				if f = 0 then ignore(rtype r) else ignore(tfield r (f - 1) false)
+			| OAsm (_,_,r) ->
+				if r > 0 then ignore(rtype (r - 1))
+			| OCatch _ ->
 				()
 		) f.code
 		(* TODO : check that all path correctly initialize NULL values and reach a return *)

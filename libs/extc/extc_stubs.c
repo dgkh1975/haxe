@@ -28,6 +28,7 @@
 #ifdef _WIN32
 #	include <windows.h>
 #	include <conio.h>
+#	include <io.h>
 #else
 #	include <dlfcn.h>
 #	include <limits.h>
@@ -92,7 +93,7 @@ int Zflush_val(value zflush_val) {
 		case 4: return Z_FINISH;
 		// TODO: support Z_BLOCK and Z_TREE
 		// TODO: append the received value
-		default: failwith("Error in `Zflush_val` (extc_stubs.c): Unknown zflush value");
+		default: caml_failwith("Error in `Zflush_val` (extc_stubs.c): Unknown zflush value");
 	}
 	assert(0);
 }
@@ -222,14 +223,14 @@ CAMLprim value zlib_deflate_init2(value level_val, value window_bits_val) {
 			break;
 		case Z_STREAM_ERROR:
 			// TODO: use stream->msg to get _zlib_'s text message
-			failwith("Error in `zlib_deflate_init2` (extc_stubs.c): call to `deflateInit2` failed: Z_STREAM_ERROR");
+			caml_failwith("Error in `zlib_deflate_init2` (extc_stubs.c): call to `deflateInit2` failed: Z_STREAM_ERROR");
 			break;
 		case Z_VERSION_ERROR:
 			// TODO: use stream->msg to get _zlib_'s text message
-			failwith("Error in `zlib_deflate_init2` (extc_stubs.c): call to `deflateInit2` failed: Z_VERSION_ERROR");
+			caml_failwith("Error in `zlib_deflate_init2` (extc_stubs.c): call to `deflateInit2` failed: Z_VERSION_ERROR");
 			break;
 		default:
-			failwith("Error in `zlib_deflate_init2` (extc_stubs.c): unknown return code from `deflateInit2`");
+			caml_failwith("Error in `zlib_deflate_init2` (extc_stubs.c): unknown return code from `deflateInit2`");
 	}
 	assert(0);
 }
@@ -275,7 +276,7 @@ CAMLprim value zlib_deflate(value stream_val, value src, value spos, value slen,
 	if (deflate_result == Z_OK || deflate_result == Z_STREAM_END) {
 		stream->next_in = NULL;
 		stream->next_out = NULL;
-		value zresult = alloc_small(3, 0);
+		value zresult = caml_alloc_small(3, 0);
 		// z_finish
 		Field(zresult, 0) = Val_bool(deflate_result == Z_STREAM_END);
 		// z_read
@@ -291,14 +292,14 @@ CAMLprim value zlib_deflate(value stream_val, value src, value spos, value slen,
 			break;
 		case Z_STREAM_ERROR:
 			// TODO: use stream->msg to get _zlib_'s text message
-			failwith("Error in `zlib_deflate` (extc_stubs.c): call to `deflate` failed: Z_STREAM_ERROR");
+			caml_failwith("Error in `zlib_deflate` (extc_stubs.c): call to `deflate` failed: Z_STREAM_ERROR");
 			break;
 		case Z_BUF_ERROR:
 			// TODO: use stream->msg to get _zlib_'s text message
-			failwith("Error in `zlib_deflate` (extc_stubs.c): call to `deflate` failed: Z_BUF_ERROR");
+			caml_failwith("Error in `zlib_deflate` (extc_stubs.c): call to `deflate` failed: Z_BUF_ERROR");
 			break;
 		default:
-			failwith("Error in `zlib_deflate` (extc_stubs.c): unknown return code from `deflate`");
+			caml_failwith("Error in `zlib_deflate` (extc_stubs.c): unknown return code from `deflate`");
 	}
 	assert(0);
 }
@@ -309,14 +310,14 @@ CAMLprim value zlib_deflate_bytecode(value *arg, int nargs) {
 
 CAMLprim value zlib_deflate_end(value zv) {
 	if( deflateEnd(ZStreamP_val(zv)) != 0 )
-		failwith("zlib_deflate_end");
+		caml_failwith("zlib_deflate_end");
 	return Val_unit;
 }
 
 CAMLprim value zlib_inflate_init(value wbits) {
 	value z = zlib_new_stream();
 	if( inflateInit2(ZStreamP_val(z),Int_val(wbits)) != Z_OK )
-		failwith("zlib_inflate_init");
+		caml_failwith("zlib_inflate_init");
 	return z;
 }
 
@@ -330,12 +331,12 @@ CAMLprim value zlib_inflate( value zv, value src, value spos, value slen, value 
 	z->avail_in = Int_val(slen);
 	z->avail_out = Int_val(dlen);
 	if( (r = inflate(z,Int_val(flush))) < 0 )
-		failwith("zlib_inflate");
+		caml_failwith("zlib_inflate");
 
 	z->next_in = NULL;
 	z->next_out = NULL;
 
-	res = alloc_small(3, 0);
+	res = caml_alloc_small(3, 0);
 	Field(res, 0) = Val_bool(r == Z_STREAM_END);
 	Field(res, 1) = Val_int(Int_val(slen) - z->avail_in);
 	Field(res, 2) = Val_int(Int_val(dlen) - z->avail_out);
@@ -348,7 +349,7 @@ CAMLprim value zlib_inflate_bytecode(value * arg, int nargs) {
 
 CAMLprim value zlib_inflate_end(value zv) {
 	if( inflateEnd(ZStreamP_val(zv)) != 0 )
-		failwith("zlib_inflate_end");
+		caml_failwith("zlib_inflate_end");
 	return Val_unit;
 }
 
@@ -368,13 +369,13 @@ CAMLprim value executable_path(value u) {
 #ifdef _WIN32
 	char path[MAX_PATH];
 	if( GetModuleFileName(NULL,path,MAX_PATH) == 0 )
-		failwith("executable_path");
+		caml_failwith("executable_path");
 	return caml_copy_string(path);
 #elif __APPLE__
 	char path[MAXPATHLEN+1];
 	uint32_t path_len = MAXPATHLEN;
 	if ( _NSGetExecutablePath(path, &path_len) )
-		failwith("executable_path");
+		caml_failwith("executable_path");
 	return caml_copy_string(path);
 #elif __FreeBSD__
 	char path[PATH_MAX];
@@ -387,7 +388,7 @@ CAMLprim value executable_path(value u) {
 	len = sizeof(path);
 	error = sysctl(name, 4, path, &len, NULL, 0);
 	if( error < 0 )
-		failwith("executable_path");
+		caml_failwith("executable_path");
 	return caml_copy_string(path);
 #else
 	char path[PATH_MAX];
@@ -397,7 +398,7 @@ CAMLprim value executable_path(value u) {
 		if( p != NULL )
 			return caml_copy_string(p);
 		else
-			failwith("executable_path");
+			caml_failwith("executable_path");
 	}
 	path[length] = '\0';
 	return caml_copy_string(path);
@@ -408,12 +409,12 @@ CAMLprim value get_full_path( value f ) {
 #ifdef _WIN32
 	char path[MAX_PATH];
 	if( GetFullPathName(String_val(f),MAX_PATH,path,NULL) == 0 )
-		failwith("get_full_path");
+		caml_failwith("get_full_path");
 	return caml_copy_string(path);
 #else
 	char path[4096];
 	if( realpath(String_val(f),path) == NULL )
-		failwith("get_full_path");
+		caml_failwith("get_full_path");
 	return caml_copy_string(path);
 #endif
 }
@@ -428,7 +429,7 @@ CAMLprim value get_real_path( value path ) {
 
 	// this will ensure the full class path with proper casing
 	if( GetFullPathName(String_val(path),MAX_PATH,out,NULL) == 0 )
-		failwith("get_real_path");
+		caml_failwith("get_real_path");
 
 	len = strlen(out);
 	i = 0;
@@ -487,11 +488,14 @@ CAMLprim value get_real_path( value path ) {
 #define TimeSpecToSeconds(ts) (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0
 #endif
 
+#ifdef WIN32
+static LARGE_INTEGER freq;
+static int freq_init = -1;
+#endif
+
 CAMLprim value sys_time() {
 #ifdef _WIN32
 #define EPOCH_DIFF	(134774*24*60*60.0)
-	static LARGE_INTEGER freq;
-	static int freq_init = -1;
 	LARGE_INTEGER counter;
 	if( freq_init == -1 )
 		freq_init = QueryPerformanceFrequency(&freq);
@@ -501,7 +505,7 @@ CAMLprim value sys_time() {
 		ULARGE_INTEGER ui;
 		GetSystemTime(&t);
 		if( !SystemTimeToFileTime(&t,&ft) )
-			failwith("sys_cpu_time");
+			caml_failwith("sys_cpu_time");
 		ui.LowPart = ft.dwLowDateTime;
 		ui.HighPart = ft.dwHighDateTime;
 		return caml_copy_double( ((double)ui.QuadPart) / 10000000.0 - EPOCH_DIFF );
@@ -521,7 +525,7 @@ CAMLprim value sys_time() {
 
 	elapsedNano = time * sTimebaseInfo.numer / sTimebaseInfo.denom;
 
-	return caml_copy_double(time / 1000000000.0);
+	return caml_copy_double((double)elapsedNano / 1000000000.0);
 #elif defined CLOCK_MONOTONIC_RAW
 	struct timespec t;
 	clock_gettime(CLOCK_MONOTONIC_RAW, &t);
@@ -533,9 +537,47 @@ CAMLprim value sys_time() {
 #endif
 }
 
+CAMLprim value sys_timestamp_ms() {
+#ifdef _WIN32
+	if (-1 == freq_init) {
+		freq_init = QueryPerformanceFrequency(&freq);
+	}
+
+	LARGE_INTEGER time;
+	QueryPerformanceCounter(&time);
+
+	return caml_copy_int64(time.QuadPart * 1000LL / freq.QuadPart);
+#else
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts)) {
+		caml_failwith("Failed to get time from the monotonic clock");
+	}
+
+	return caml_copy_int64(ts.tv_sec * 1000 + (ts.tv_nsec / 1000000));
+#endif
+}
+
 CAMLprim value sys_getch( value b ) {
 #	ifdef _WIN32
-	return Val_int( Bool_val(b)?getche():getch() );
+	/* getch()/getche() from <conio.h> read from the console input buffer,
+	   not from stdin.  When stdin is a pipe or file (e.g. subprocess with
+	   redirected input) they ignore the redirected data entirely.
+	   Detect this and fall back to _read() on the raw file descriptor. */
+	{
+		HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+		DWORD ft = (h != INVALID_HANDLE_VALUE) ? GetFileType(h) : FILE_TYPE_CHAR;
+		if (ft == FILE_TYPE_CHAR) {
+			return Val_int( Bool_val(b) ? getche() : getch() );
+		} else {
+			unsigned char c;
+			int n = _read(0, &c, 1);
+			if (n <= 0) return Val_int(-1);
+			if (Bool_val(b)) {
+				_write(1, &c, 1);
+			}
+			return Val_int(c);
+		}
+	}
 #	else
 	// took some time to figure out how to do that
 	// without relying on ncurses, which clear the

@@ -3,15 +3,12 @@ open Globals
 open Type
 open Meta
 
-type generation_mode =
-	| GMFull
-	| GMWithoutDoc
-	| GMMinimum
-
 type context = {
-	generation_mode : generation_mode;
 	generate_abstract_impl : bool;
-	request : JsonRequest.json_request option
+	generate_member_bodies : bool;
+	generate_docs : bool;
+	generate_exprs : bool;
+	generate_origins : bool;
 }
 
 let jnull = Json.JNull
@@ -91,9 +88,8 @@ let generate_pos ctx p =
 let generate_expr_pos ctx p =
 	jtodo
 
-let generate_doc ctx d = match ctx.generation_mode with
-	| GMFull -> jopt jstring (gen_doc_text_opt d)
-	| GMWithoutDoc | GMMinimum -> jnull
+let generate_doc ctx d =
+	if ctx.generate_docs then jopt jstring (gen_doc_text_opt d) else jnull
 
 (** return a range JSON structure for given position
     positions are 0-based and the result object looks like this:
@@ -148,6 +144,7 @@ let rec generate_binop ctx op =
 	| OpInterval -> "OpInterval",None
 	| OpArrow -> "OpArrow",None
 	| OpIn -> "OpIn",None
+	| OpNullCoal -> "OpNullCoal",None
 	in
 	generate_adt ctx (Some (["haxe";"macro"],"Binop")) name args
 
@@ -176,24 +173,10 @@ and generate_metadata_entry ctx (m,el,p) =
 
 and generate_metadata ctx ml =
 	let ml = List.filter (fun (m,_,_) ->
-		let (_,(_,flags)) = Meta.get_info m in
-		not (List.mem UsedInternally flags)
+		let (_,data) = Meta.get_info m in
+		not data.m_internal
 	) ml in
 	jlist (generate_metadata_entry ctx) ml
-
-and generate_minimum_metadata ctx ml =
-	match ctx.request with
-		| None -> None
-		| Some request ->
-			match request#get_requested_meta_list with
-				| None -> None
-				| Some requested ->
-					let ml =
-						List.filter
-							(fun (m,_,_) -> List.exists (fun r -> r = to_string m) requested)
-							ml
-					in
-					Some (jlist (generate_metadata_entry ctx) ml)
 
 (* AST.ml structures *)
 
@@ -214,11 +197,10 @@ let rec generate_type ctx t =
 			| Some t -> loop t
 			end
 		| TLazy f ->
-			(* return_partial_type := true; *)
 			let t = lazy_type f in
-			(* return_partial_type := false; *)
 			loop t
-		| TDynamic t -> "TDynamic",Some (if t == t_dynamic then jnull else generate_type ctx t)
+		| TDynamic None -> "TDynamic", Some jnull
+		| TDynamic (Some t) -> "TDynamic",Some (generate_type ctx t)
 		| TInst(c,tl) -> "TInst",Some (generate_type_path_with_params ctx c.cl_module.m_path c.cl_path tl c.cl_meta)
 		| TEnum(en,tl) -> "TEnum",Some (generate_type_path_with_params ctx en.e_module.m_path en.e_path tl en.e_meta)
 		| TType(td,tl) -> "TType",Some (generate_type_path_with_params ctx td.t_module.m_path td.t_path tl td.t_meta)
@@ -234,7 +216,7 @@ and generate_anon_status ctx status =
 		| Closed -> "AClosed",None
 		| Const -> "AConst",None
 		| Extend tl -> "AExtend", Some (generate_types ctx tl)
-		| Statics c -> "AClassStatics",Some (class_ref ctx c)
+		| ClassStatics c -> "AClassStatics",Some (class_ref ctx c)
 		| EnumStatics en -> "AEnumStatics",Some (enum_ref ctx en)
 		| AbstractStatics a -> "AAbstractStatics", Some (abstract_ref ctx a)
 	in
@@ -274,14 +256,11 @@ and generate_type_path_with_params ctx mpath tpath tl meta =
 
 (* type parameter *)
 
-and generate_type_parameter ctx (s,t) =
-	let generate_constraints () = match follow t with
-		| TInst({cl_kind = KTypeParameter tl},_) -> generate_types ctx tl
-		| _ -> die "" __LOC__
-	in
+and generate_type_parameter ctx ttp =
 	jobject [
-		"name",jstring s;
-		"constraints",generate_constraints ();
+		"name",jstring ttp.ttp_name;
+		"constraints",generate_types ctx (get_constraints ttp);
+		"defaultType",jopt (generate_type ctx) ttp.ttp_default;
 	]
 
 (* texpr *)
@@ -423,12 +402,6 @@ and generate_texpr ctx e =
 	| TBlock el ->
 		let el = List.map (generate_texpr ctx) el in
 		"TBlock",Some (jarray el)
-	| TFor(v,e1,e2) ->
-		"TFor",Some (jobject [
-			"v",generate_tvar ctx v;
-			"expr1",generate_texpr ctx e1;
-			"expr2",generate_texpr ctx e2;
-		]);
 	| TIf(e1,e2,eo) ->
 		"TIf",Some (jobject [
 			"eif",generate_texpr ctx e1;
@@ -506,6 +479,7 @@ and generate_class_field' ctx cfs cf =
 				| AccNever -> "AccNever",None
 				| AccCtor -> "AccCtor",None
 				| AccCall -> "AccCall",None
+				| AccPrivateCall -> "AccPrivateCall",None
 				| AccInline -> "AccInline",None
 				| AccRequire(s,so) -> "AccRequire",Some (jobject ["require",jstring s;"message",jopt jstring so])
 			in
@@ -526,8 +500,8 @@ and generate_class_field' ctx cfs cf =
 		in
 		generate_adt ctx None name args
 	in
-	let expr = match ctx.generation_mode with
-		| GMFull | GMWithoutDoc ->
+	let expr =
+		if ctx.generate_exprs then begin
 			let value = match cf.cf_kind with
 				| Method _ -> None
 				| Var _ ->
@@ -548,7 +522,7 @@ and generate_class_field' ctx cfs cf =
 						jnull
 				| Some e -> jobject ["string",jstring (Ast.Printer.s_expr e)]
 			end
-		| GMMinimum ->
+		end else
 			jnull
 	in
 	[
@@ -599,7 +573,7 @@ let generate_class ctx c =
 	let generate_class_kind ck =
 		let ctor,args = match ck with
 		| KNormal -> "KNormal",None
-		| KTypeParameter tl -> "KTypeParameter",Some (generate_types ctx tl)
+		| KTypeParameter ttp -> "KTypeParameter",Some (generate_types ctx (get_constraints ttp))
 		| KExpr e -> "KExpr",Some (generate_expr ctx e)
 		| KGeneric -> "KGeneric",None
 		| KGenericInstance(c,tl) -> "KGenericInstance",Some (generate_type_path_with_params ctx c.cl_module.m_path c.cl_path tl c.cl_meta)
@@ -621,11 +595,11 @@ let generate_class ctx c =
 		"isInterface",jbool (has_class_flag c CInterface);
 		"superClass",jopt generate_class_relation c.cl_super;
 		"interfaces",jlist generate_class_relation c.cl_implements;
-		"fields",jlist (generate_class_field ctx CFSMember) c.cl_ordered_fields;
-		"statics",jlist (generate_class_field ctx CFSStatic) c.cl_ordered_statics;
-		"constructor",jopt (generate_class_field ctx CFSConstructor) c.cl_constructor;
-		"init",jopt (generate_texpr ctx) c.cl_init;
-		"overrides",jlist (classfield_ref ctx) (List.filter (fun cf -> has_class_field_flag cf CfOverride) c.cl_ordered_fields);
+		"fields",if ctx.generate_member_bodies then jlist (generate_class_field ctx CFSMember) c.cl_ordered_fields else jarray [];
+		"statics",if ctx.generate_member_bodies then jlist (generate_class_field ctx CFSStatic) c.cl_ordered_statics else jarray [];
+		"constructor",if ctx.generate_member_bodies then jopt (generate_class_field ctx CFSConstructor) c.cl_constructor else jnull;
+		"init",if ctx.generate_member_bodies then jopt (generate_texpr ctx) (TClass.get_cl_init c) else jnull;
+		"overrides",if ctx.generate_member_bodies then jlist (classfield_ref ctx) (List.filter (fun cf -> has_class_field_flag cf CfOverride) c.cl_ordered_fields) else jarray [];
 		"isExtern",jbool (has_class_flag c CExtern);
 		"isFinal",jbool (has_class_flag c CFinal);
 		"isAbstract",jbool (has_class_flag c CAbstract);
@@ -639,8 +613,8 @@ let generate_enum ctx e =
 		) e.e_names)
 	in
 	[
-		"constructors",generate_enum_constructors ();
-		"isExtern",jbool e.e_extern;
+		"constructors",if ctx.generate_member_bodies then generate_enum_constructors () else jarray [];
+		"isExtern",jbool (has_enum_flag e EnExtern)
 	]
 
 let generate_typedef ctx td =
@@ -704,32 +678,54 @@ let generate_module_type ctx mt =
 
 (* module *)
 
-let generate_module ctx m =
+let generate_module modules find_module m =
 	jobject [
 		"id",jint m.m_id;
 		"path",generate_module_path m.m_path;
 		"types",jlist (fun mt -> generate_type_path m.m_path (t_infos mt).mt_path (t_infos mt).mt_meta) m.m_types;
 		"file",jstring (Path.UniqueKey.lazy_path m.m_extra.m_file);
 		"sign",jstring (Digest.to_hex m.m_extra.m_sign);
-		"dependencies",jarray (PMap.fold (fun m acc -> (jobject [
-			"path",jstring (s_type_path m.m_path);
-			"sign",jstring (Digest.to_hex m.m_extra.m_sign);
-		]) :: acc) m.m_extra.m_deps []);
+		"cacheState",jstring (match m.m_extra.m_cache_state with
+			| MSGood -> "Good"
+			| MSBad reason -> Printer.s_module_skip_reason reason
+			| MSUnknown -> "Unknown");
+		"dependencies",jarray (PMap.fold (fun mdep acc ->
+			(jobject [
+				"path",jstring (s_type_path mdep.md_path);
+				"sign",jstring (Digest.to_hex (find_module mdep.md_path).m_extra.m_sign);
+			]) :: acc
+		) m.m_extra.m_deps []);
+		"dependents",jarray (List.map (fun (path, sign) -> (jobject [
+			"path",jstring (s_type_path path);
+			"sign",jstring (Digest.to_hex sign);
+		])) (Hashtbl.fold (fun _ (m':HxbData.module_cache) acc ->
+			if PMap.mem m.m_id m'.mc_extra.m_deps then (m'.mc_path, m'.mc_extra.m_sign) :: acc
+			else acc
+		) modules []));
 	]
 
-let create_context ?jsonrpc gm = {
-	generation_mode = gm;
+let create_full_config () = {
 	generate_abstract_impl = false;
-	request = match jsonrpc with None -> None | Some jsonrpc -> Some (new JsonRequest.json_request jsonrpc)
+	generate_member_bodies = true;
+	generate_docs = true;
+	generate_exprs = true;
+	generate_origins = true;
 }
 
-let generate types file =
-	let t = Timer.timer ["generate";"json";"construct"] in
-	let ctx = create_context GMFull in
-	let json = jarray (List.map (generate_module_type ctx) types) in
-	t();
-	let t = Timer.timer ["generate";"json";"write"] in
-	let ch = open_out_bin file in
-	Json.write_json (output_string ch) json;
-	close_out ch;
-	t()
+let create_minimal_config () = {
+	(create_full_config ()) with
+	generate_docs = false;
+	generate_exprs = false;
+	generate_origins = false;
+}
+
+let generate timer_ctx types file =
+	let json = Timer.time timer_ctx ["generate";"json";"construct"] (fun () ->
+		let ctx = create_full_config () in
+		jarray (List.map (generate_module_type ctx) types)
+	) () in
+	Timer.time timer_ctx ["generate";"json";"write"] (fun () ->
+		let ch = open_out_bin file in
+		Json.write_json (output_string ch) json;
+		close_out ch;
+	) ()

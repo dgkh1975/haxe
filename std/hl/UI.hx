@@ -132,6 +132,9 @@ typedef FileOptions = {
 	var ?filterIndex:Int;
 	var ?fileName:String;
 	var ?title:String;
+#if (hl_ver >= version("2.0.0"))
+	var ?isFolder: Bool;
+#end
 }
 
 /**
@@ -150,7 +153,7 @@ class UI {
 	}
 
 	public static function dialog(title:String, text:String, flags:haxe.EnumFlags<DialogFlags>) {
-		@:privateAccess _dialog(title.bytes, text.bytes, flags.toInt());
+		return @:privateAccess _dialog(title.bytes, text.bytes, flags.toInt()) != 0;
 	}
 
 	@:hlNative("ui", "ui_loop")
@@ -206,6 +209,10 @@ class UI {
 		}
 		if (opts.window != null)
 			out.window = opts.window.h;
+#if (hl_ver >= version("2.0.0"))
+		if (opts.isFolder != null)
+			out.isFolder = opts.isFolder;
+#end
 		var str = _chooseFile(save, out);
 		return str == null ? null : String.fromUCS2(str);
 	}
@@ -214,4 +221,37 @@ class UI {
 	static function _chooseFile(forSave:Bool, obj:Dynamic):hl.Bytes {
 		return null;
 	}
+	
+	#if (hl_ver >= version("1.12.0"))
+	public static function setClipboardText(text:String):Bool {
+		if(text == null)
+			return false;
+		return @:privateAccess _setClipboardText(text.toUtf8());
+	}
+
+	@:hlNative("?ui", "ui_set_clipboard_text")
+	static function _setClipboardText(text:hl.Bytes):Bool {
+		return false;
+	}
+
+	public static function getClipboardText():String {
+		var t = _getClipboardText();
+		if( t == null )
+			return null;
+		return @:privateAccess String.fromUTF8(t);
+	}
+
+	@:hlNative("?ui", "ui_get_clipboard_text")
+	static function _getClipboardText():hl.Bytes {
+		return null;
+	}
+	#else
+	public static function setClipboardText(text:String):Bool {
+		return false;
+	}
+	public static function getClipboardText():String {
+		return null;
+	}
+	#end
+	
 }

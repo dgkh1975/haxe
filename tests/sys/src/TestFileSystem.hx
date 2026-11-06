@@ -60,6 +60,13 @@ class TestFileSystem extends utest.Test {
 			//read directory with complex path
 			Assert.isTrue(FileSystem.readDirectory("../sys/./.." + tailingSlash).indexOf("sys") > -1);
 		}
+		// should throw if directory doesn't exist
+		try {
+			FileSystem.readDirectory("non-existant");
+			Assert.isFalse(true);
+		} catch (_) {
+			Assert.isTrue(true);
+		}
 	}
 
 	function testCreateDirectory():Void {
@@ -121,6 +128,32 @@ class TestFileSystem extends utest.Test {
 		Assert.isTrue(stat != null);
 	}
 
+	function testStatFile() {
+		var path = dir + "statFile.txt";
+		var before = Date.now().getTime();
+		sys.io.File.saveContent(path, "hello");
+		var stat = FileSystem.stat(path);
+		Assert.equals(5, stat.size);
+		Assert.isTrue(Math.abs(stat.mtime.getTime() - before) < 10000);
+	}
+
+	#if ((hl && hl_ver >= version("2.0.0")) || eval || jvm || python)
+	function testStatSubSecond() {
+		// a file written on an exact second is possible, so try a few
+		var subSecond = false;
+		for (i in 0...5) {
+			var path = dir + "statSubSecond" + i + ".txt";
+			sys.io.File.saveContent(path, "hello");
+			if (FileSystem.stat(path).mtime.getTime() % 1000 != 0) {
+				subSecond = true;
+				break;
+			}
+			Sys.sleep(0.01);
+		}
+		Assert.isTrue(subSecond);
+	}
+	#end
+
 	function testCreateExistingDirectory() {
 		var testDir = dir + "exists";
 		FileSystem.createDirectory(testDir);
@@ -141,8 +174,7 @@ class TestFileSystem extends utest.Test {
 	}
 
 	static function normPath(p:String, properCase = false):String {
-		if (Sys.systemName() == "Windows")
-		{
+		if (Sys.systemName() == "Windows") {
 			// on windows, haxe returns lowercase paths with backslashes, drive letter uppercased
 			p = p.substr(0, 1).toUpperCase() + p.substr(1);
 			p = p.replace("/", "\\");

@@ -1,4 +1,7 @@
 {
+	"terminal.integrated.env.windows": {
+		"PATH": "${workspaceFolder};${workspaceFolder}/opam;${env:PATH}"
+	},
 	"files.associations": {
 		"*.mly": "ocaml",
 		"*.ml": "ocaml",
@@ -28,5 +31,9 @@
 			],
 			"url": "./.vscode/schemas/meta.schema.json"
 		}
-	]
+	],
+	"ocaml.sandbox": {
+		"kind": "opam",
+		"switch": "default"
+	}
 }

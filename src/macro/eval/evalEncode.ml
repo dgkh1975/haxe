@@ -141,7 +141,7 @@ let encode_obj l =
 	let proto,sorted = ctx.get_object_prototype ctx l in
 	vobject {
 		ofields = Array.of_list (List.map snd sorted);
-		oproto = proto;
+		oproto = OProto proto;
 	}
 
 let encode_obj_s l =
@@ -161,6 +161,7 @@ let encode_enum i pos index pl =
 	let open MacroApi in
 	let key = match i with
 		| IExpr -> key_haxe_macro_ExprDef
+		| IEFieldKind -> key_haxe_macro_EFieldKind
 		| IBinop -> key_haxe_macro_Binop
 		| IUnop -> key_haxe_macro_Unop
 		| IConst -> key_haxe_macro_Constant
@@ -181,6 +182,12 @@ let encode_enum i pos index pl =
 		| IImportMode -> key_haxe_macro_ImportMode
 		| IQuoteStatus -> key_haxe_macro_QuoteStatus
 		| IDisplayKind -> key_haxe_macro_DisplayKind
+		| IDisplayMode -> key_haxe_macro_DisplayMode
+		| ICapturePolicy -> key_haxe_macro_CapturePolicy
+		| IVarScope -> key_haxe_macro_VarScope
+		| IVarScopingFlags -> key_haxe_macro_VarScopingFlags
+		| IPlatform -> key_haxe_macro_Platform
+		| IPackageRule -> key_haxe_macro_PackageRule
 		| IMessage -> key_haxe_macro_Message
 		| IFunctionKind -> key_haxe_macro_FunctionKind
 		| IStringLiteralKind -> key_haxe_macro_StringLiteralKind
@@ -224,9 +231,9 @@ let encode_string s =
 
 (* Should only be used for std types that aren't expected to change while the compilation server is running *)
 let create_cached_instance path fkind =
-	let proto = lazy (get_instance_prototype (get_ctx()) path null_pos) in
+	let proto = AtomicLazy.from_fun (fun () -> get_instance_prototype (get_ctx()) path null_pos) in
 	(fun v ->
-		create_instance_direct (Lazy.force proto) (fkind v)
+		create_instance_direct (AtomicLazy.force proto) (fkind v)
 	)
 
 let encode_bytes =
@@ -235,6 +242,9 @@ let encode_bytes =
 let encode_int_map_direct =
 	create_cached_instance key_haxe_ds_IntMap (fun s -> IIntMap s)
 
+let encode_int64_map_direct =
+	create_cached_instance key_haxe_ds_Int64Map (fun s -> IInt64Map s)
+
 let encode_string_map_direct =
 	create_cached_instance key_haxe_ds_StringMap (fun s -> IStringMap s)
 
@@ -242,49 +252,52 @@ let encode_object_map_direct =
 	create_cached_instance key_haxe_ds_ObjectMap (fun (s : value ValueHashtbl.t) -> IObjectMap (Obj.magic s))
 
 let encode_string_map convert m =
-	let h = StringHashtbl.create () in
-	PMap.iter (fun key value -> StringHashtbl.add h (create_ascii key) (convert value)) m;
+	let h = RuntimeStringHashtbl.create () in
+	PMap.iter (fun key value -> RuntimeStringHashtbl.add h (create_ascii key) (convert value)) m;
 	encode_string_map_direct h
 
-let fake_proto path =
-	let proto = {
-		ppath = path;
-		pfields = [||];
-		pnames = IntMap.empty;
-		pinstance_names = IntMap.empty;
-		pinstance_fields = [||];
-		pparent = None;
-		pkind = PInstance;
-		pvalue = vnull;
-	} in
-	proto.pvalue <- vprototype proto;
-	proto
+let fake_proto cache path =
+	try Hashtbl.find cache path
+	with Not_found ->
+		let proto = {
+			ppath = path;
+			pfields = [||];
+			pnames = IntMap.empty;
+			pinstance_names = IntMap.empty;
+			pinstance_fields = [||];
+			pparent = None;
+			pkind = PInstance;
+			pvalue = vnull;
+		} in
+		proto.pvalue <- vprototype proto;
+		Hashtbl.replace cache path proto;
+		proto
 
 let encode_unsafe o =
 	vinstance {
 		ifields = [||];
-		iproto = fake_proto key_haxe_macro_Unsafe;
+		iproto = fake_proto (get_ctx()).fake_proto_cache key_haxe_macro_Unsafe;
 		ikind = IRef (Obj.repr o);
 	}
 
 let encode_pos p =
 	vinstance {
 		ifields = [||];
-		iproto = fake_proto key_haxe_macro_Position;
+		iproto = fake_proto (get_ctx()).fake_proto_cache key_haxe_macro_Position;
 		ikind = IPos p;
 	}
 
 let encode_lazytype t f =
 	vinstance {
 		ifields = [||];
-		iproto = fake_proto key_haxe_macro_LazyType;
+		iproto = fake_proto (get_ctx()).fake_proto_cache key_haxe_macro_LazyType;
 		ikind = ILazyType(t,f);
 	}
 
 let encode_tdecl t =
 	vinstance {
 		ifields = [||];
-		iproto = fake_proto key_haxe_macro_TypeDecl;
+		iproto = fake_proto (get_ctx()).fake_proto_cache key_haxe_macro_TypeDecl;
 		ikind = ITypeDecl t;
 	}
 
@@ -309,12 +322,7 @@ let encode_ref v convert tostr =
 		ikind = IRef (Obj.repr v);
 	}
 
-let encode_lazy f =
-	let rec r = ref (fun () ->
-		let v = f() in
-		r := (fun () -> v);
-		v
-	) in
+let encode_lazy r =
 	VLazy r
 
 let encode_option encode_value o =

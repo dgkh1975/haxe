@@ -70,7 +70,7 @@ let tpath t =
 	real_path i.mt_path i.mt_meta
 
 let rec follow_param t =
-	match t with
+	match (follow_lazy t) with
 	| TMono r ->
 		(match r.tm_type with
 		| Some t -> follow_param t
@@ -81,7 +81,7 @@ let rec follow_param t =
 		t
 
 let gen_meta meta =
-	let meta = List.filter (fun (m,_,_) -> match m with Meta.Used | Meta.MaybeUsed | Meta.RealPath | Meta.Pure -> false | _ -> true) meta in
+	let meta = List.filter (fun (m,_,_) -> match m with Meta.Used | Meta.RealPath | Meta.Pure | Meta.HxbId -> false | _ -> true) meta in
 	match meta with
 	| [] -> []
 	| _ ->
@@ -122,7 +122,8 @@ let rec gen_type ?(values=None) t =
 		) args in
 		node "f" (("a",names) :: values) (List.map gen_type (args @ [r]))
 	| TAnon a -> node "a" [] (pmap (fun f -> gen_field [] { f with cf_flags = unset_flag f.cf_flags (int_of_class_field_flag CfPublic) }) a.a_fields)
-	| TDynamic t2 -> node "d" [] (if t == t2 then [] else [gen_type t2])
+	| TDynamic None -> node "d" [] []
+	| TDynamic (Some t2) -> node "d" [] [gen_type t2]
 	| TLazy f -> gen_type (lazy_type f)
 
 and gen_type_decl n t pl =
@@ -134,7 +135,7 @@ and gen_field att f =
 		match acc with
 		| AccNormal | AccRequire _ | AccCtor -> att
 		| AccNo | AccNever -> (name, "null") :: att
-		| AccCall -> (name,"accessor") :: att
+		| AccCall | AccPrivateCall -> (name,"accessor") :: att
 		| AccInline -> (name,"inline") :: att
 	in
 	let att = (match f.cf_expr with None -> att | Some e -> ("line",string_of_int (Lexer.get_error_line e.epos)) :: att) in
@@ -157,7 +158,7 @@ and gen_field att f =
 			in
 			att,get_value_meta f.cf_meta
 	) in
-	let att = (match f.cf_params with [] -> att | l -> ("params", String.concat ":" (List.map (fun (n,_) -> n) l)) :: att) in
+	let att = (match f.cf_params with [] -> att | l -> ("params", String.concat ":" (List.map extract_param_name l)) :: att) in
 	let overloads = match List.map (gen_field []) f.cf_overloads with
 		| [] -> []
 		| nl -> [node "overloads" [] nl]
@@ -200,7 +201,7 @@ let gen_type_params ipos priv path params pos m =
 	let mpriv = (if priv then [("private","1")] else []) in
 	let mpath = (if m.m_path <> path then [("module",snd (gen_path m.m_path false))] else []) in
 	let file = (if ipos && pos <> null_pos then [("file",pos.pfile)] else []) in
-	gen_path path priv :: ("params", String.concat ":" (List.map fst params)) :: (file @ mpriv @ mpath)
+	gen_path path priv :: ("params", String.concat ":" (List.map extract_param_name params)) :: (file @ mpriv @ mpath)
 
 let gen_class_path name (c,pl) =
 	node name [("path",s_type_path (tpath (TClassDecl c)))] (List.map gen_type pl)
@@ -211,12 +212,12 @@ let rec exists f c =
 			| None -> false
 			| Some (csup,_) -> exists f csup
 
-let rec gen_type_decl com pos t =
+let rec gen_type_decl pos t =
 	let m = (t_infos t).mt_module in
 	match t with
 	| TClassDecl c ->
 		let stats = List.filter (fun cf ->
-			cf.cf_name <> "__meta__" && not (Meta.has Meta.GenericInstance cf.cf_meta)
+			cf.cf_name <> "__meta__" && not (Meta.has Meta.GenericInstance cf.cf_meta) && not (Meta.has Meta.NoDoc cf.cf_meta)
 		) c.cl_ordered_statics in
 		let stats = List.map (gen_field ["static","1"]) stats in
 		let fields = List.filter (fun cf ->
@@ -253,10 +254,10 @@ let rec gen_type_decl com pos t =
 		let doc = gen_doc_opt a.a_doc in
 		let meta = gen_meta a.a_meta in
 		let mk_cast t = node "icast" [] [gen_type t] in
-		let mk_field_cast (t,cf) = node "icast" ["field",cf.cf_name] [gen_type t] in
-		let sub = (match a.a_from,a.a_from_field with [],[] -> [] | l1,l2 -> [node "from" [] ((List.map mk_cast l1) @ (List.map mk_field_cast l2))]) in
-		let super = (match a.a_to,a.a_to_field with [],[] -> [] | l1,l2 -> [node "to" [] ((List.map mk_cast l1) @ (List.map mk_field_cast l2))]) in
-		let impl = (match a.a_impl with None -> [] | Some c -> [node "impl" [] [gen_type_decl com pos (TClassDecl c)]]) in
+		let mk_field_cast (t,cf) = if Meta.has Meta.NoDoc cf.cf_meta then None else Some (node "icast" ["field",cf.cf_name] [gen_type t]) in
+		let sub = (match a.a_from,a.a_from_field with [],[] -> [] | l1,l2 -> [node "from" [] ((List.map mk_cast l1) @ (ExtList.List.filter_map mk_field_cast l2))]) in
+		let super = (match a.a_to,a.a_to_field with [],[] -> [] | l1,l2 -> [node "to" [] ((List.map mk_cast l1) @ (ExtList.List.filter_map mk_field_cast l2))]) in
+		let impl = (match a.a_impl with None -> [] | Some c -> [node "impl" [] [gen_type_decl pos (TClassDecl c)]]) in
 		let this = [node "this" [] [gen_type a.a_this]] in
 		node "abstract" (gen_type_params pos a.a_private (tpath t) a.a_params a.a_pos m) (sub @ this @ super @ doc @ meta @ impl)
 
@@ -287,18 +288,21 @@ let rec write_xml ch tabs x =
 		IO.printf ch "<![CDATA[%s]]>" s
 
 let generate com file =
-	let t = Timer.timer ["generate";"xml"] in
-	let x = node "haxe" [] (List.map (gen_type_decl com true) (List.filter (fun t -> not (Meta.has Meta.NoDoc (t_infos t).mt_meta)) com.types)) in
-	t();
-	let t = Timer.timer ["write";"xml"] in
-	let ch = IO.output_channel (open_out_bin file) in
-	IO.printf ch "<!-- This file can be parsed by haxe.rtti.XmlParser -->\n";
-	write_xml ch "" x;
-	IO.close_out ch;
-	t()
+	let f () =
+		node "haxe" [] (List.map (gen_type_decl true) (List.filter (fun t -> not (Meta.has Meta.NoDoc (t_infos t).mt_meta)) com.types))
+	in
+	let x = Timer.time com.timer_ctx ["generate";"xml"] f () in
 
-let gen_type_string ctx t =
-	let x = gen_type_decl ctx false t in
+	let f () =
+		let ch = IO.output_channel (open_out_bin file) in
+		IO.printf ch "<!-- This file can be parsed by haxe.rtti.XmlParser -->\n";
+		write_xml ch "" x;
+		IO.close_out ch;
+	in
+	Timer.time com.timer_ctx ["write";"xml"] f ()
+
+let gen_type_string t =
+	let x = gen_type_decl false t in
 	let ch = IO.output_string() in
 	write_xml ch "" x;
 	IO.close_out ch

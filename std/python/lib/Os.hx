@@ -57,6 +57,12 @@ extern class Os {
 
 	static function putenv(name:String, value:String):Void;
 
+	/** Removes the value for the environment variable `name`.
+
+		When targeting python versions prior to 3.9, this function may not exist on some platforms.
+	 **/
+	static function unsetenv(name:String):Void;
+
 	static function chdir(path:String):Void;
 
 	static function unlink(path:String):Void;
@@ -86,7 +92,7 @@ extern class Os {
 	static var sep(default, null):String;
 	static var pathsep(default, null):String;
 
-	static function makedirs(path:String, mode:Int = 511 /* Oktal 777 */, exist_ok:Bool = false):Void;
+	static function makedirs(path:String, mode:Int = 511 /* Octal 777 */, exist_ok:Bool = false):Void;
 
-	static function mkdir(path:String, mode:Int = 511 /* Oktal 777 */):Void;
+	static function mkdir(path:String, mode:Int = 511 /* Octal 777 */):Void;
 }

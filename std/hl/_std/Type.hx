@@ -22,6 +22,7 @@
 enum ValueType {
 	TNull;
 	TInt;
+	TInt64;
 	TFloat;
 	TBool;
 	TObject;
@@ -38,12 +39,18 @@ class Type {
 	static inline function get_allTypes():hl.types.BytesMap
 		return untyped $allTypes();
 
-	@:keep static function init():Void {
+	@:keep static function init():Bool {
+		if( allTypes != null )
+			return false;
 		untyped $allTypes(new hl.types.BytesMap());
+		return true;
 	}
 
-	@:keep static function initClass(ct:hl.Type, t:hl.Type, name:hl.Bytes):hl.BaseType.Class@:privateAccess {
-		var c:hl.BaseType.Class = ct.allocObject();
+	@:keep static function initClass(ct:hl.Type, t:hl.Type, name:hl.Bytes):hl.BaseType.Class @:privateAccess {
+		var c:hl.BaseType.Class = cast t.getGlobal();
+		if( c != null )
+			return c;
+		c = ct.allocObject();
 		t.setGlobal(c);
 		c.__type__ = t;
 		c.__name__ = String.fromUCS2(name);
@@ -51,8 +58,28 @@ class Type {
 		return c;
 	}
 
+	@:keep static function loadClass(ct:hl.Type, t:hl.Type, name:hl.Bytes):hl.BaseType.Class @:privateAccess {
+		#if (hl_ver < version("1.16.0"))
+		throw "Resolving classes dynamicaly requires -D hl-ver=1.16.0";
+		#else
+		var c:hl.BaseType.Class = cast t.getGlobal();
+		if( c != null )
+			return c;
+		c = hl.Api.resolveTypeDyn(t,ct);
+		if( c == null )
+			throw "Imported type '"+name+"' could not be resolved";
+		t.setGlobal(c);
+		register(name, c);
+		return c;
+		#end
+	}
+
+
 	@:keep static function initEnum(et:hl.Type, t:hl.Type):hl.BaseType.Enum@:privateAccess {
-		var e:hl.BaseType.Enum = et.allocObject();
+		var e:hl.BaseType.Enum = cast t.getGlobal();
+		if( e != null )
+			return e;
+		e = et.allocObject();
 		e.__type__ = t;
 		e.__evalues__ = t.getEnumValues();
 		e.__ename__ = t.getTypeName();
@@ -73,7 +100,7 @@ class Type {
 		allTypes.set(b, t);
 	}
 
-	public static function getClass<T>(o:T):Class<T> {
+	public static function getClass<T>(o:T):Null<Class<T>> {
 		var t = hl.Type.getDynamic(o);
 		if (t.kind == HVirtual) {
 			o = hl.Api.getVirtualValue(o);
@@ -84,14 +111,14 @@ class Type {
 		return null;
 	}
 
-	public static function getEnum(o:EnumValue):Enum<Dynamic> {
+	public static function getEnum(o:EnumValue):Null<Enum<Dynamic>> {
 		var t = hl.Type.getDynamic(o);
 		if (t.kind == HEnum)
 			return t.getGlobal();
 		return null;
 	}
 
-	public static function getSuperClass(c:Class<Dynamic>):Class<Dynamic>@:privateAccess {
+	public static function getSuperClass(c:Class<Dynamic>):Null<Class<Dynamic>>@:privateAccess {
 		var c:hl.BaseType.Class = cast c;
 		var t = c.__type__.getSuper();
 		return t == hl.Type.void() ? null : t.getGlobal();
@@ -107,14 +134,14 @@ class Type {
 		return e.__ename__;
 	}
 
-	public static function resolveClass(name:String):Class<Dynamic> {
+	public static function resolveClass(name:String):Null<Class<Dynamic>> {
 		var t:hl.BaseType = allTypes.get(@:privateAccess name.bytes);
 		if (t == null || !Std.isOfType(t, hl.BaseType.Class))
 			return null;
 		return cast t;
 	}
 
-	public static function resolveEnum(name:String):Enum<Dynamic> {
+	public static function resolveEnum(name:String):Null<Enum<Dynamic>> {
 		var t:hl.BaseType = allTypes.get(@:privateAccess name.bytes);
 		if (t == null || !Std.isOfType(t, hl.BaseType.Enum))
 			return null;
@@ -205,6 +232,8 @@ class Type {
 				return TNull;
 			case HUI8, HUI16, HI32:
 				return TInt;
+			case HI64:
+				return TInt64;
 			case HF32, HF64:
 				return (v : Int) == (v:Float) ? TInt : TFloat;
 			case HBool:
@@ -215,6 +244,10 @@ class Type {
 				var c:Dynamic = Type.getClass(v);
 				if (c == Class || c == null)
 					return TObject;
+				#if (hl_ver < version("1.12.0") || hl_legacy32)
+				if (c == @:privateAccess haxe.Int64.IMPL)
+					return TInt64;
+				#end
 				return TClass(c);
 			case HEnum:
 				return TEnum(Type.getEnum(v));
@@ -246,6 +279,7 @@ class Type {
 	}
 
 	public static function enumParameters(e:EnumValue):Array<Dynamic> {
+		if( e == null ) (e:Dynamic)(); // trigger null access
 		var arr = _enumParameters(e);
 		return cast hl.types.ArrayObj.alloc(arr);
 	}

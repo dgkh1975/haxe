@@ -40,6 +40,8 @@ class builder path_this path_super = object(self)
 	val methods = DynArray.create ()
 	val method_sigs = Hashtbl.create 0
 	val inner_classes = Hashtbl.create 0
+	val typed_function_paths = Hashtbl.create 0
+	val closure_ids_per_name = Hashtbl.create 0
 	val mutable spawned_methods = []
 	val mutable static_init_method = None
 	val mutable source_file = None
@@ -78,6 +80,16 @@ class builder path_this path_super = object(self)
 	method has_method (name : string) (jsig : jsignature) =
 		Hashtbl.mem method_sigs (name,generate_method_signature false jsig)
 
+	method get_next_closure_id (name : string) =
+		try
+			let r = Hashtbl.find closure_ids_per_name name in
+			incr r;
+			!r
+		with Not_found ->
+			let r = ref 0 in
+			Hashtbl.add closure_ids_per_name name r;
+			!r
+
 	method spawn_inner_class (jm : JvmMethod.builder option) (path_super : jpath) (name : string option) =
 		let path = match name with
 			| None -> (fst path_this,Printf.sprintf "%s$%i" (snd path_this) (Hashtbl.length inner_classes))
@@ -105,6 +117,12 @@ class builder path_this path_super = object(self)
 			jc#set_source_file file
 		end;
 		jc
+
+	method add_typed_function (path : jpath) =
+		Hashtbl.add typed_function_paths path ()
+
+	method has_typed_function (path : jpath) =
+		Hashtbl.mem typed_function_paths path
 
 	method spawn_method (name : string) (jsig_method : jsignature) (flags : MethodAccessFlags.t list) =
 		let jm = new JvmMethod.builder self name jsig_method in

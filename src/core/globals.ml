@@ -6,9 +6,37 @@ type pos = {
 
 type path = string list * string
 
-module IntMap = Ptmap
+module IntMap = Map.Make(struct type t = int let compare i1 i2 = i2 - i1 end)
 module StringMap = Map.Make(struct type t = string let compare = String.compare end)
 module Int32Map = Map.Make(struct type t = Int32.t let compare = Int32.compare end)
+
+module IntHashtbl = Hashtbl.Make(struct
+	type t = int
+
+	let equal =
+		Int.equal
+
+	let hash = Int.hash
+end)
+
+module Int64Hashtbl = Hashtbl.Make(struct
+	type t = Signed.Int64.t
+
+	let equal =
+		Signed.Int64.equal
+
+	let hash = Hashtbl.hash
+end)
+
+module StringHashtbl = Hashtbl.Make(struct
+	type t = string
+
+	let equal =
+		String.equal
+
+	let hash s =
+		Hashtbl.hash s
+end)
 
 type platform =
 	| Cross
@@ -18,23 +46,69 @@ type platform =
 	| Flash
 	| Php
 	| Cpp
-	| Cs
-	| Java
+	| Jvm
 	| Python
 	| Hl
 	| Eval
+	| CustomTarget of string
 
-let version = 4200
+type compiler_version = {
+	version: int;
+	major: int;
+	minor: int;
+	revision: int;
+	pre: string option;
+	extra: (string * string) option;
+}
+
+let version = 5000
 let version_major = version / 1000
 let version_minor = (version mod 1000) / 100
 let version_revision = (version mod 100)
-let version_pre = Some "rc.1"
+let version_pre = Some "preview.1"
 
-let macro_platform = ref Neko
+let file_pos file = { pfile = file; pmin = 0; pmax = 0 }
+let fake_pos p = { pfile = p; pmin = -1; pmax = -1 }
+let null_pos = fake_pos "?"
 
-let return_partial_type = ref false
+let no_color = false
+let c_reset = if no_color then "" else "\x1b[0m"
+let c_dim = if no_color then "" else "\x1b[2m"
+
+let loc_short (loc:Printexc.location) =
+	Printf.sprintf "%s:%d" loc.filename loc.line_number
+
+let loc_to_string (loc:Printexc.location) =
+	Printf.sprintf "%s, line %d, characters %d-%d" loc.filename loc.line_number loc.start_char loc.end_char
+
+let trace s =
+	let stack = Printexc.get_callstack 2 in
+	match Printexc.backtrace_slots stack with
+	| Some [|_; item |] ->
+		(match Printexc.Slot.location item with
+		| Some loc -> print_endline (Printf.sprintf "%s%s:%s %s" c_dim (loc_short loc) c_reset s)
+		| _ -> ())
+	| _ ->
+		()
+
+let trace_call_stack ?(n:int = 5) () =
+	assert (n >= 0);
+	let stack = Printexc.get_callstack (n+2) in
+	let len = Printexc.raw_backtrace_length stack - 1 in
+
+	let slot = Printexc.convert_raw_backtrace_slot (Printexc.get_raw_backtrace_slot stack 1) in
+	let loc = Printexc.Slot.location slot in
+	Option.may (fun loc -> print_endline (Printf.sprintf "%s%s:%s" c_dim (loc_short loc) c_reset)) loc;
+
+	for i = 2 to len do
+		let slot = Printexc.convert_raw_backtrace_slot (Printexc.get_raw_backtrace_slot stack i) in
+		let loc = Printexc.Slot.location slot in
+		Option.may (fun loc -> print_endline (Printf.sprintf "  called from %s" (loc_to_string loc))) loc;
+	done
 
 let is_windows = Sys.os_type = "Win32" || Sys.os_type = "Cygwin"
+
+let max_custom_target_len = 16
 
 let platforms = [
 	Js;
@@ -43,13 +117,13 @@ let platforms = [
 	Flash;
 	Php;
 	Cpp;
-	Cs;
-	Java;
+	Jvm;
 	Python;
 	Hl;
 	Eval;
 ]
 
+(** Expected to match `haxe.display.Display.Platform`. *)
 let platform_name = function
 	| Cross -> "cross"
 	| Js -> "js"
@@ -58,18 +132,30 @@ let platform_name = function
 	| Flash -> "flash"
 	| Php -> "php"
 	| Cpp -> "cpp"
-	| Cs -> "cs"
-	| Java -> "java"
+	| Jvm -> "jvm"
 	| Python -> "python"
 	| Hl -> "hl"
 	| Eval -> "eval"
+	| CustomTarget c -> c
+
+let parse_platform = function
+	| "cross" -> Cross
+	| "js" -> Js
+	| "lua" -> Lua
+	| "neko" -> Neko
+	| "flash" -> Flash
+	| "php" -> Php
+	| "cpp" -> Cpp
+	| "jvm" -> Jvm
+	| "python" -> Python
+	| "hl" -> Hl
+	| "eval" -> Eval
+	| p -> CustomTarget p
 
 let platform_list_help = function
 	| [] -> ""
 	| [p] -> " (" ^ platform_name p ^ " only)"
 	| pl -> " (for " ^ String.concat "," (List.map platform_name pl) ^ ")"
-
-let null_pos = { pfile = "?"; pmin = -1; pmax = -1 }
 
 let mk_zero_range_pos p = { p with pmax = p.pmin }
 
@@ -82,14 +168,25 @@ let get_error_pos_ref : ((string -> int -> string) -> pos -> string) ref = ref (
 	Printf.sprintf "%s: characters %d-%d" p.pfile p.pmin p.pmax
 )
 
-let s_version with_build =
+let s_version =
 	let pre = Option.map_default (fun pre -> "-" ^ pre) "" version_pre in
-	let build =
-		match with_build, Version.version_extra with
-			| true, Some (_,build) -> "+" ^ build
-			| _, _ -> ""
-	in
-	Printf.sprintf "%d.%d.%d%s%s" version_major version_minor version_revision pre build
+	Printf.sprintf "%d.%d.%d%s" version_major version_minor version_revision pre
+
+let s_version_full v =
+	match v.extra with
+		| Some (_,build) -> s_version ^ "+" ^ build
+		| _ -> s_version
+
+
+let patch_string_pos p s = { p with pmin = p.pmax - String.length s }
+
+let gen_local_prefix = "`"
+
+(* msg * backtrace *)
+exception Ice of string * string
+
+(* Raised to cooperatively cancel an ongoing compiler operation *)
+exception Cancelled
 
 (**
 	Terminates compiler process and prints user-friendly instructions about filing an issue.
@@ -111,7 +208,13 @@ let die ?p msg ml_loc =
 		try snd (ExtString.String.split backtrace "\n")
 		with ExtString.Invalid_string -> backtrace
 	in
-	let ver = s_version true
-	and os_type = if Sys.unix then "unix" else "windows" in
-	Printf.eprintf "%s\nHaxe: %s; OS type: %s;\n%s\n%s" msg ver os_type ml_loc backtrace;
-	assert false
+	let backtrace = ml_loc ^ "\n" ^ backtrace in
+	raise (Ice (msg,backtrace))
+
+let dump_callstack () =
+	print_endline (Printexc.raw_backtrace_to_string (Printexc.get_callstack 200))
+
+let dump_backtrace () =
+	print_endline (Printexc.raw_backtrace_to_string (Printexc.get_raw_backtrace ()))
+
+let i32_31 = Int32.of_int 31

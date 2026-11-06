@@ -45,26 +45,6 @@ class BytesIterator<T> extends ArrayIterator<T> {
 }
 
 @:keep
-@:generic
-class BytesKeyValueIterator<T> extends ArrayKeyValueIterator<T> {
-	var a : ArrayBytes<T>;
-
-	public function new(a) {
-		super((null:Dynamic));
-		this.a = a;
-	}
-
-	override public function hasNext():Bool {
-		return current < a.length;
-	}
-
-	override public function next():{key:Int, value:T} {
-		var v = @:privateAccess a.bytes.get(current);
-		return {key:current++, value:v};
-	}
-}
-
-@:keep
 @:generic class ArrayBytes<T> extends ArrayBase {
 	var bytes:hl.BytesAccess<T>;
 	var size:Int;
@@ -98,7 +78,9 @@ class BytesKeyValueIterator<T> extends ArrayKeyValueIterator<T> {
 		if (length == 0)
 			return null;
 		length--;
-		return bytes[length];
+		var v = bytes[length];
+		bytes[length] = cast 0;
+		return v;
 	}
 
 	public function push(x:T):Int {
@@ -126,6 +108,7 @@ class BytesKeyValueIterator<T> extends ArrayKeyValueIterator<T> {
 		var v = bytes[0];
 		length--;
 		(bytes : Bytes).blit(0, bytes, 1 << bytes.sizeBits, length << bytes.sizeBits);
+		bytes[length] = cast 0;
 		return v;
 	}
 
@@ -162,9 +145,20 @@ class BytesKeyValueIterator<T> extends ArrayKeyValueIterator<T> {
 	}
 
 	public function sort(f:T->T->Int):Void {
-		if (Type.get((cast null : T)) == Type.get(0))
+		var tid = Type.get((cast null : T));
+		if (tid == Type.get(0))
 			(bytes : Bytes).sortI32(0, length, cast f);
-		else
+		else if( tid == Type.get((0:hl.I64)) ) {
+			#if (hl_ver >= version("1.16.0") && !hl_legacy32)
+			(bytes : Bytes).sortI64(0, length, cast f);
+			#else
+			throw "Array sort I64 requires -D hl-ver=1.16.0";
+			#end
+		#if (hl_ver >= version("1.16.0") && !hl_legacy32)
+		} else if( tid == Type.get((0:hl.GUID)) ) {
+			(bytes : Bytes).sortI64(0, length, cast f);
+		#end
+		} else
 			(bytes : Bytes).sortF64(0, length, cast f);
 	}
 
@@ -191,6 +185,7 @@ class BytesKeyValueIterator<T> extends ArrayKeyValueIterator<T> {
 		ret.size = ret.length = len;
 		var end = pos + len;
 		(bytes : Bytes).blit(pos << bytes.sizeBits, bytes, end << bytes.sizeBits, (length - end) << bytes.sizeBits);
+		(bytes : Bytes).fill((length - len) << bytes.sizeBits, (len) << bytes.sizeBits, 0);
 		length -= len;
 		return ret;
 	}
@@ -285,7 +280,7 @@ class BytesKeyValueIterator<T> extends ArrayKeyValueIterator<T> {
 	}
 
 	public function keyValueIterator() : ArrayKeyValueIterator<T> {
-		return new BytesKeyValueIterator<T>(this);
+		return new ArrayKeyValueIterator<T>(cast this);
 	}
 
 	public function map<S>(f:T->S):ArrayDyn@:privateAccess {
@@ -318,14 +313,14 @@ class BytesKeyValueIterator<T> extends ArrayKeyValueIterator<T> {
 
 	override function getDyn(pos:Int):Dynamic {
 		var pos:UInt = pos;
-		if (pos >= length)
+		if (pos >= (length : UInt))
 			return bytes.nullValue;
 		return bytes[pos];
 	}
 
 	override function setDyn(pos:Int, v:Dynamic) {
 		var pos:UInt = pos;
-		if (pos >= length)
+		if (pos >= (length : UInt))
 			__expand(pos);
 		bytes[pos] = v;
 	}
@@ -376,5 +371,12 @@ class BytesKeyValueIterator<T> extends ArrayKeyValueIterator<T> {
 
 typedef ArrayI32 = ArrayBytes<Int>;
 typedef ArrayUI16 = ArrayBytes<UI16>;
+typedef ArrayUI8 = ArrayBytes<UI8>;
 typedef ArrayF32 = ArrayBytes<F32>;
 typedef ArrayF64 = ArrayBytes<Float>;
+#if (hl_ver >= version("1.13.0") && !hl_legacy32)
+typedef ArrayI64 = ArrayBytes<I64>;
+#end
+#if (hl_ver >= version("1.16.0") && !hl_legacy32)
+typedef ArrayGUID = ArrayBytes<GUID>;
+#end

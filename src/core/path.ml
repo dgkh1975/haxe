@@ -44,6 +44,8 @@ let parse_path f =
 		| [x] ->
 			check_invalid_char x;
 			[],x
+		| _ :: ("_std" :: l) ->
+			loop l
 		| x :: l ->
 			check_package_name x;
 			let path,name = loop l in
@@ -223,7 +225,7 @@ end = struct
 
 	let create =
 		if Globals.is_windows then
-			(fun f -> String.lowercase (get_full_path f))
+			(fun f -> ExtString.String.lowercase (get_full_path f))
 		else
 			get_full_path
 
@@ -317,6 +319,8 @@ let module_name_of_file file =
 	| [] ->
 		Globals.die "" __LOC__
 
+let mkdir_mutex = Mutex.create ()
+
 let rec create_file bin ext acc = function
 	| [] -> Globals.die "" __LOC__
 	| d :: [] ->
@@ -327,7 +331,7 @@ let rec create_file bin ext acc = function
 		ch
 	| d :: l ->
 		let dir = String.concat "/" (List.rev (d :: acc)) in
-		if not (Sys.file_exists (remove_trailing_slash dir)) then Unix.mkdir dir 0o755;
+		Mutex.protect mkdir_mutex (fun () -> if not (Sys.file_exists (remove_trailing_slash dir)) then Unix.mkdir dir 0o755);
 		create_file bin ext (d :: acc) l
 
 let rec mkdir_recursive base dir_list =
@@ -351,7 +355,11 @@ let rec mkdir_recursive base dir_list =
 				Unix.mkdir path 0o755;
 		mkdir_recursive (if (path = "") then "/" else path) remaining
 
-let mkdir_from_path path =
+(**
+	Recursively creates `path`.
+	Raises `Unix.Unix_error` exceptions as-is.
+*)
+let mkdir_from_path_unix_err path =
 	let parts = Str.split_delim (Str.regexp "[\\/]+") path in
 	match parts with
 		| [] -> (* path was "" *) ()
@@ -359,8 +367,23 @@ let mkdir_from_path path =
 			let dir_list = List.rev (List.tl (List.rev parts)) in
 			mkdir_recursive "" dir_list
 
+(**
+	Recursively creates `path`.
+	Converts all `Unix.Unix_error` exceptions to human-readable `Failure msg`.
+*)
+let mkdir_from_path path =
+	try
+		mkdir_from_path_unix_err path
+	with Unix.Unix_error(err,_,args) ->
+		raise (Failure (Printf.sprintf "%s (%s)" (Unix.error_message err) args))
+
 let full_dot_path pack mname tname =
 	if tname = mname then (pack,mname) else (pack @ [mname],tname)
+
+let file_extension file =
+	match List.rev (ExtString.String.nsplit file ".") with
+	| e :: _ -> ExtString.String.lowercase e
+	| [] -> ""
 
 module FilePath = struct
 	type t = {

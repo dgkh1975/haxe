@@ -22,7 +22,6 @@
 open Globals
 open Ast
 open Parser
-open DisplayTypes.DiagnosticsSeverity
 open DisplayTypes.DisplayMode
 open Common
 open Type
@@ -32,91 +31,94 @@ open Error
 exception DisplayInMacroBlock
 
 let parse_file_from_lexbuf com file p lexbuf =
-	let t = Timer.timer ["parsing"] in
-	Lexer.init file;
-	incr stats.s_files_parsed;
+	incr com.request_scope.stats.s_files_parsed;
 	let parse_result = try
-		ParserEntry.parse Grammar.parse_file com.defines lexbuf file
+		ParserEntry.parse (ParserConfig.file_parser_config com file) Grammar.parse_file (Lexer.create_file_ctx file) lexbuf file
 	with
 		| Sedlexing.MalFormed ->
-			t();
-			error "Malformed file. Source files must be encoded with UTF-8." {pfile = file; pmin = 0; pmax = 0}
+			raise_typing_error "Malformed file. Source files must be encoded with UTF-8." (file_pos file)
 		| e ->
-			t();
 			raise e
 	in
-	begin match !Parser.display_mode,parse_result with
+	begin match com.display.dms_kind,parse_result with
 		| DMModuleSymbols (Some ""),_ -> ()
-		| DMModuleSymbols filter,(ParseSuccess(data,_,_)) when filter = None && DisplayPosition.display_position#is_in_file (com.file_keys#get file) ->
+		| DMModuleSymbols filter,(ParseSuccess(data,_)) when filter = None && DisplayPosition.display_position#is_in_file (com.part_scope.file_keys#get file) ->
 			let ds = DocumentSymbols.collect_module_symbols None (filter = None) data in
-			DisplayException.raise_module_symbols (DocumentSymbols.Printer.print_module_symbols com [file,ds] filter);
+			DisplayException.send_module_symbols_raise com (DocumentSymbols.Printer.json_of_module_symbols com [file,ds] filter);
+		| _,ParseSuccess(_,({pd_was_display_file = true} as pdi)) ->
+			if pdi.pd_had_resume then
+				com.part_scope.parser_state.had_parser_resume <- true;
+			Atomic.set com.part_scope.parser_state.delayed_syntax_completion pdi.pd_delayed_syntax_completion
 		| _ ->
 			()
 	end;
-	t();
 	Common.log com ("Parsed " ^ file);
 	parse_result
 
+let parse_file_from_lexbuf com file p lexbuf =
+	Timer.time com.timer_ctx ["parsing"] (parse_file_from_lexbuf com file p) lexbuf
+
 let parse_file_from_string com file p string =
-	parse_file_from_lexbuf com file p (Sedlexing.Utf8.from_string string)
+	parse_file_from_lexbuf com file p (Lexer.lexbuf_from_utf8_string string)
 
-let current_stdin = ref None (* TODO: we're supposed to clear this at some point *)
+let parse_file com rfile p =
+	let file_key = com.part_scope.file_keys#get rfile.ClassPaths.file in
+	let contents = match com.file_contents with
+		| [] when (Common.defined com Define.DisplayStdin) && DisplayPosition.display_position#is_in_file file_key ->
+			let s = Std.input_all stdin in
+			close_in stdin;
+			com.file_contents <- [file_key, Some s];
+			Some s
+		| [] -> None
+		| files ->
+			(try List.assoc file_key files with Not_found -> None)
+	in
 
-let parse_file com file p =
-	let use_stdin = (Common.defined com Define.DisplayStdin) && DisplayPosition.display_position#is_in_file (com.file_keys#get file) in
-	if use_stdin then
-		let s =
-			match !current_stdin with
-			| Some s ->
-				s
-			| None ->
-				let s = Std.input_all stdin in
-				close_in stdin;
-				current_stdin := Some s;
-				s
-		in
-		parse_file_from_string com file p s
-	else
-		let ch = try open_in_bin file with _ -> error ("Could not open " ^ file) p in
-		Std.finally (fun() -> close_in ch) (parse_file_from_lexbuf com file p) (Sedlexing.Utf8.from_channel ch)
+	match contents with
+	| Some s ->
+		parse_file_from_string com rfile.file p s
+	| _ ->
+		match rfile.class_path#file_kind with
+		| FFile ->
+			let file = rfile.file in
+			let ch = try open_in_bin file with _ -> raise_typing_error ("Could not open " ^ file) p in
+			let s = Std.finally (fun() -> close_in ch) (fun ch -> really_input_string ch (in_channel_length ch)) ch in
+			parse_file_from_string com file p s
 
 let parse_hook = ref parse_file
 
 let resolve_module_file com m remap p =
 	let forbid = ref false in
-	let compose_path no_rename =
+	let compose_path =
 		(match m with
 		| [] , name -> name
 		| x :: l , name ->
 			let x = (try
 				match PMap.find x com.package_rules with
 				| Forbidden -> forbid := true; x
-				| Directory d -> if no_rename then x else d
 				| Remap d -> remap := d :: l; d
 				with Not_found -> x
 			) in
 			String.concat "/" (x :: l) ^ "/" ^ name
 		) ^ ".hx"
 	in
-	let file = try
-			Common.find_file com (compose_path false)
-		with Not_found ->
-			Common.find_file com (compose_path true)
-	in
-	let file = (match String.lowercase (snd m) with
-	| "con" | "aux" | "prn" | "nul" | "com1" | "com2" | "com3" | "lpt1" | "lpt2" | "lpt3" when Sys.os_type = "Win32" ->
-		(* these names are reserved by the OS - old DOS legacy, such files cannot be easily created but are reported as visible *)
-		if (try (Unix.stat file).Unix.st_size with _ -> 0) > 0 then file else raise Not_found
-	| _ -> file
-	) in
+	let rfile = com.class_paths#find_file compose_path in
+	begin match rfile.class_path#file_kind with
+		| FFile -> (match ExtString.String.lowercase (snd m) with
+			| "con" | "aux" | "prn" | "nul" | "com1" | "com2" | "com3" | "lpt1" | "lpt2" | "lpt3" when Sys.os_type = "Win32" ->
+				(* these names are reserved by the OS - old DOS legacy, such files cannot be easily created but are reported as visible *)
+				if (try (Unix.stat rfile.file).Unix.st_size with _ -> 0) > 0 then () else raise Not_found
+			| _ ->
+				())
+	end;
 	(* if we try to load a std.xxxx class and resolve a real std file, the package name is not valid, ignore *)
 	(match fst m with
 	| "std" :: _ ->
-		let file_key = com.file_keys#get file in
-		if List.exists (fun path -> Path.UniqueKey.starts_with file_key (com.file_keys#get path)) com.std_path then raise Not_found;
+		let file_key = com.part_scope.file_keys#get rfile.file in
+		if List.exists (fun path -> Path.UniqueKey.starts_with file_key (com.part_scope.file_keys#get path#path)) com.class_paths#get_std_paths then raise Not_found;
 	| _ -> ());
 	if !forbid then begin
-		let parse_result = (!parse_hook) com file p in
+		let parse_result = (!parse_hook) com rfile p in
 		let rec loop decls = match decls with
 			| ((EImport _,_) | (EUsing _,_)) :: decls -> loop decls
 			| (EClass d,_) :: _ -> d.d_meta
@@ -127,7 +129,7 @@ let resolve_module_file com m remap p =
 			| [] -> []
 		in
 		let meta = match parse_result with
-			| ParseSuccess((_,decls),_,_) -> loop decls
+			| ParseSuccess((_,decls),_) -> loop decls
 			| ParseError _ -> []
 		in
 		if not (Meta.has Meta.NoPackageRestrict meta) then begin
@@ -135,23 +137,18 @@ let resolve_module_file com m remap p =
 			raise (Forbid_package ((x,m,p),[],platform_name_macro com));
 		end;
 	end;
-	file
+	rfile
 
 let resolve_module_file com m remap p =
 	try
-		Hashtbl.find com.module_to_file m
+		com.module_to_file#find m
 	with Not_found ->
-		let file = resolve_module_file com m remap p in
-		Hashtbl.add com.module_to_file m file;
-		file
-
-(* let resolve_module_file com m remap p =
-	let timer = Timer.timer ["typing";"resolve_module_file"] in
-	Std.finally timer (resolve_module_file com m remap) p *)
+		let rfile = resolve_module_file com m remap p in
+		com.module_to_file#add m rfile;
+		rfile
 
 module ConditionDisplay = struct
 	open ParserEntry
-	open CompletionItem.CompletionType
 	open DisplayPosition
 
 	exception Result of expr
@@ -177,7 +174,7 @@ module ConditionDisplay = struct
 				| ECall ((EConst (Ident "version"),p),_)  ->
 					let t = TFun ([("s",false,com.basic.tstring)],t_semver) in
 					if check_position p then
-						DisplayException.raise_hover (CompletionItem.make_ci_class_field {
+						DisplayException.send_hover_raise com (CompletionItem.make_ci_class_field {
 							field = {
 								cf_name = "version";
 								cf_type = t;
@@ -210,7 +207,7 @@ so it should be avoided if backwards-compatibility with earlier versions is need
 						} (tpair t)) None p
 				| EConst(Ident(n)) ->
 					let v = eval com.defines (e,p) in
-					DisplayException.raise_hover (CompletionItem.make_ci_define n (match v with
+					DisplayException.send_hover_raise com (CompletionItem.make_ci_define n (match v with
 						| TNull -> None
 						| TString s -> Some (StringHelper.s_escape s)
 						| _ -> die "" __LOC__
@@ -224,7 +221,7 @@ so it should be avoided if backwards-compatibility with earlier versions is need
 			if check_position p then
 				let v = eval com.defines (e,p) in
 				let s,t = convert_small_type com v in
-				DisplayException.raise_hover (CompletionItem.make_ci_literal s (tpair t)) None p
+				DisplayException.send_hover_raise com (CompletionItem.make_ci_literal s (tpair t)) None p
 		in
 		loop e;
 end
@@ -237,7 +234,7 @@ module PdiHandler = struct
 		ParserEntry.is_true (ParserEntry.eval defines e)
 
 	let handle_pdi com pdi =
-		let macro_defines = adapt_defines_to_macro_context com.defines in
+		let macro_defines = adapt_defines_to_macro_context com.Common.defines in
 		let check = (if com.display.dms_kind = DMHover then
 			encloses_position_gt
 		else
@@ -245,13 +242,13 @@ module PdiHandler = struct
 		) display_position#get in
 		List.iter (fun (p,e) ->
 			let has_macro_define = is_true macro_defines e in
-			if has_macro_define then com.display_information.display_module_has_macro_defines <- true;
+			if has_macro_define then com.part_scope.parser_state.display_module_has_macro_defines <- true;
 			if check p then begin
 				if has_macro_define then
 					raise DisplayInMacroBlock;
 				begin match com.display.dms_kind with
 				| DMHover ->
-					raise (DisplayException.DisplayException(DisplayHover None))
+					DisplayException.send_no_result_raise com
 				| _ ->
 					()
 				end;
@@ -270,43 +267,45 @@ let handle_parser_result com p result =
 	let handle_parser_error msg p =
 		let msg = Parser.error_msg msg in
 		match com.display.dms_error_policy with
-			| EPShow -> error msg p
-			| EPIgnore -> ()
-			| EPCollect -> add_diagnostics_message com msg p DKParserError Error
+			| EPShow ->
+				if is_diagnostics com then add_diagnostics_message ~diagnostics_kind:DKParserError com msg p MKError
+				else raise_typing_error msg p
+			| EPIgnore ->
+				com.part_scope.has_error <- true
 	in
 	match result with
-		| ParseSuccess(data,is_display_file,pdi) ->
-			if is_display_file then begin
+		| ParseSuccess(data,pdi) ->
+			if pdi.pd_was_display_file then begin
 				begin match pdi.pd_errors with
 				| (msg,p) :: _ -> handle_parser_error msg p
 				| [] -> ()
 				end;
 				PdiHandler.handle_pdi com pdi;
 			end;
-			data
+			data,pdi.pd_warnings
 		| ParseError(data,(msg,p),_) ->
 			handle_parser_error msg p;
-			data
+			data,[]
 
 let parse_module_file com file p =
 	handle_parser_result com p ((!parse_hook) com file p)
 
 let parse_module' com m p =
 	let remap = ref (fst m) in
-	let file = resolve_module_file com m remap p in
-	let pack,decls = parse_module_file com file p in
-	file,remap,pack,decls
+	let rfile = resolve_module_file com m remap p in
+	let (pack,decls),warnings = parse_module_file com rfile p in
+	rfile,remap,pack,decls,warnings
 
-let parse_module ctx m p =
-	let file,remap,pack,decls = parse_module' ctx.com m p in
+let parse_module com m p =
+	let rfile,remap,pack,decls,warnings = parse_module' com m p in
 	if pack <> !remap then begin
 		let spack m = if m = [] then "`package;`" else "`package " ^ (String.concat "." m) ^ ";`" in
 		if p == null_pos then
-			display_error ctx ("Invalid commandline class : " ^ s_type_path m ^ " should be " ^ s_type_path (pack,snd m)) p
+			display_error com ("Invalid commandline class : " ^ s_type_path m ^ " should be " ^ s_type_path (pack,snd m)) p
 		else
-			display_error ctx (spack pack ^ " in " ^ file ^ " should be " ^ spack (fst m)) {p with pmax = p.pmin}
+			display_error com (spack pack ^ " in " ^ rfile.file ^ " should be " ^ spack (fst m)) {p with pmax = p.pmin}
 	end;
-	file, if !remap <> fst m then
+	rfile, (if !remap <> fst m then
 		(* build typedefs to redirect to real package *)
 		List.rev (List.fold_left (fun acc (t,p) ->
 			let build f d =
@@ -316,7 +315,7 @@ let parse_module ctx m p =
 					d_doc = None;
 					d_meta = [];
 					d_params = d.d_params;
-					d_flags = if priv then [EPrivate] else [];
+					d_flags = if priv then [TDPrivate] else [];
 					d_data = begin
 						let tp =
 							if priv then
@@ -324,26 +323,22 @@ let parse_module ctx m p =
 							else
 								let params =
 									List.map (fun tp ->
-										TPType (CTPath (mk_type_path ([],fst tp.tp_name)),null_pos)
+										TPType (make_ptp_th_null (mk_type_path ([],fst tp.tp_name)))
 									) d.d_params
 								in
-								mk_type_path ~params (!remap,fst d.d_name)
+								mk_type_path ~params ~sub:(fst d.d_name) (!remap,snd m)
 						in
-						CTPath (tp),null_pos;
+						make_ptp_th tp (snd d.d_name)
 					end
 				},p) :: acc
 			in
 			match t with
 			| EClass d -> build HPrivate d
 			| EEnum d -> build EPrivate d
-			| ETypedef d -> build EPrivate d
+			| ETypedef d -> build TDPrivate d
 			| EAbstract d -> build AbPrivate d
 			| EStatic d -> build (AStatic,null_pos) d
 			| EImport _ | EUsing _ -> acc
 		) [(EImport (List.map (fun s -> s,null_pos) (!remap @ [snd m]),INormal),null_pos)] decls)
 	else
-		decls
-
-(* let parse_module ctx m p =
-	let timer = Timer.timer ["typing";"parse_module"] in
-	Std.finally timer (parse_module ctx m) p *)
+		decls), warnings

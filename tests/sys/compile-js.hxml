@@ -1,0 +1,17 @@
+-lib hxnodejs
+compile-each.hxml
+
+--main Main
+-js bin/js/sys.js
+
+--next
+--main TestArguments
+-js bin/js/TestArguments.js
+
+--next
+--main ExitCode
+-js bin/js/ExitCode.js
+
+--next
+--main UtilityProcess
+-js bin/js/UtilityProcess.js

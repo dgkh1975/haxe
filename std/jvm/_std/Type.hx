@@ -9,6 +9,7 @@ using jvm.NativeTools.ObjectTools;
 enum ValueType {
 	TNull;
 	TInt;
+	TInt64;
 	TFloat;
 	TBool;
 	TObject;
@@ -32,7 +33,7 @@ class Type {
 		return c.isAnnotationPresent(cast EnumValueReflectionInformation);
 	}
 
-	public static function getClass<T>(o:T):Class<T> {
+	public static function getClass<T>(o:T):Null<Class<T>> {
 		if (o == null) {
 			return null;
 		}
@@ -49,7 +50,7 @@ class Type {
 		return c.haxe();
 	}
 
-	public static function getEnum(o:EnumValue):Enum<Dynamic> {
+	public static function getEnum(o:EnumValue):Null<Enum<Dynamic>> {
 		if (o == null) {
 			return null;
 		}
@@ -60,7 +61,7 @@ class Type {
 		return c.haxeEnum();
 	}
 
-	public static function getSuperClass(c:Class<Dynamic>):Class<Dynamic> {
+	public static function getSuperClass(c:Class<Dynamic>):Null<Class<Dynamic>> {
 		if (c == String) {
 			return null;
 		}
@@ -87,12 +88,12 @@ class Type {
 
 	public static function getEnumName(e:Enum<Dynamic>):String {
 		return switch e.native().getName() {
-			case s if(s.indexOf("haxe.root.") == 0): s.substr(10);
+			case s if (s.indexOf("haxe.root.") == 0): s.substr(10);
 			case s: s;
 		}
 	}
 
-	public static function resolveClass(name:String):Class<Dynamic> {
+	public static function resolveClass(name:String):Null<Class<Dynamic>> {
 		if (name.indexOf(".") == -1) {
 			name = "haxe.root." + name;
 		}
@@ -107,7 +108,7 @@ class Type {
 		}
 	}
 
-	public static function resolveEnum(name:String):Enum<Dynamic> {
+	public static function resolveEnum(name:String):Null<Enum<Dynamic>> {
 		if (name.indexOf(".") == -1) {
 			name = "haxe.root." + name;
 		}
@@ -123,17 +124,9 @@ class Type {
 		}
 	}
 
-	static final emptyArg = {
-		var a = new java.NativeArray(1);
-		a[0] = (null : jvm.EmptyConstructor);
-		a;
-	}
+	static final emptyArg = (null : jvm.EmptyConstructor);
 
-	static final emptyClass = {
-		var a = new java.NativeArray(1);
-		a[0] = jvm.EmptyConstructor.native();
-		a;
-	}
+	static final emptyClass = jvm.EmptyConstructor.native();
 
 	public static function createInstance<T>(cl:Class<T>, args:Array<Dynamic>):T {
 		var args = @:privateAccess args.getNative();
@@ -150,7 +143,7 @@ class Type {
 			switch (Jvm.unifyCallArguments(args, params, true)) {
 				case Some(args):
 					ctor.setAccessible(true);
-					return ctor.newInstance(args);
+					return ctor.newInstance(...args);
 				case None:
 			}
 		}
@@ -166,7 +159,7 @@ class Type {
 					case Some(args):
 						var obj = emptyCtor.newInstance(emptyArg);
 						method.setAccessible(true);
-						method.invoke(obj, args);
+						method.invoke(obj, ...args);
 						return obj;
 					case None:
 				}
@@ -241,7 +234,15 @@ class Type {
 	public static function getEnumConstructs(e:Enum<Dynamic>):Array<String> {
 		var clInfo:java.lang.Class<EnumReflectionInformation> = cast EnumReflectionInformation;
 		var annotation = e.native().getAnnotation(clInfo);
-		return @:privateAccess Array.ofNative(annotation.constructorNames());
+		if (annotation != null) {
+			return @:privateAccess Array.ofNative(annotation.constructorNames());
+		}
+		var vals = e.values();
+		var ret = [];
+		for (i in 0...vals.length) {
+			ret[i] = vals[i].name();
+		}
+		return ret;
 	}
 
 	public static function typeof(v:Dynamic):ValueType {
@@ -250,6 +251,9 @@ class Type {
 			return TNull;
 		}
 		if (Jvm.instanceof(v, java.lang.Number)) {
+			if (Jvm.instanceof(v, java.lang.Long.LongClass)) {
+				return TInt64;
+			}
 			var v:java.lang.Number = cast v;
 			if (v.intValue() == v.doubleValue()) {
 				return TInt;
@@ -303,7 +307,7 @@ class Type {
 		var ret = [];
 		for (name in all) {
 			var v = Jvm.readField(e, name);
-			if (Jvm.instanceof(v, jvm.Enum)) {
+			if (Jvm.instanceof(v, java.lang.Enum)) {
 				ret.push(v);
 			}
 		}

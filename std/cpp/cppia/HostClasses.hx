@@ -46,6 +46,8 @@ class HostClasses {
 		"sys.thread.Mutex",
 		"sys.thread.Thread",
 		"sys.thread.Tls",
+		"sys.thread.Semaphore",
+		"sys.thread.Condition",
 		"cpp.vm.ExecutionTrace",
 		"cpp.vm.Gc",
 		"cpp.vm.Profiler",
@@ -56,8 +58,6 @@ class HostClasses {
 		"cpp.Finalizable",
 		"Std",
 		"StringBuf",
-		"sys.db.Mysql",
-		"sys.db.Sqlite",
 		"sys.FileSystem",
 		"sys.io.File",
 		"sys.io.FileInput",
@@ -123,6 +123,7 @@ class HostClasses {
 		"haxe.Int64",
 		"haxe.Int32",
 		"haxe.Serializer",
+		"haxe.Timer",
 		"haxe.Unserializer",
 		"haxe.ds.ArraySort",
 		"haxe.ds.GenericStack",
@@ -134,6 +135,7 @@ class HostClasses {
 		"haxe.ds.WeakMap",
 		"haxe.ds.EnumValueMap",
 		"haxe.ds.IntMap",
+		"haxe.ds.Int64Map",
 		"haxe.ds.StringMap",
 		"haxe.iterators.MapKeyValueIterator",
 		"StdTypes",
@@ -147,6 +149,8 @@ class HostClasses {
 		"List",
 		"Map",
 		"String",
+		"haxe.atomic.AtomicInt",
+		"haxe.atomic.AtomicObject",
 	];
 
 	static function parseClassInfo(externs:Map<String, Bool>, filename:String) {
@@ -174,17 +178,13 @@ class HostClasses {
 		externs.set("haxe._Int64.___Int64", true);
 		externs.set("haxe._Int32.Int32_Impl_", true);
 		externs.set("haxe._Int32.___Int32", true);
-		// Hidded in implementation classes
+		// Hidden in implementation classes
 		// externs.set("sys.db.RecordType",true);
-		externs.set("sys.db._Sqlite.SqliteConnection", true);
-		externs.set("sys.db._Sqlite.SqliteResultSet", true);
-		externs.set("sys.db._Mysql.MysqlConnection", true);
-		externs.set("sys.db._Mysql.MysqlResultSet", true);
 		externs.set("sys.net._Socket.SocketInput", true);
 		externs.set("sys.net._Socket.SocketOutput", true);
 		externs.set("sys.ssl._Socket.SocketInput", true);
 		externs.set("sys.ssl._Socket.SocketOutput", true);
-		externs.set("sys.thread._Thread.HaxeThread",true);
+		externs.set("sys.thread._Thread.HaxeThread", true);
 		externs.set("haxe.ds.TreeNode", true);
 		externs.set("haxe.xml.XmlParserException", true);
 		for (e in classes)

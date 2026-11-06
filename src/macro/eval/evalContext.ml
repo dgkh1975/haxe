@@ -22,6 +22,12 @@ open EvalValue
 open EvalHash
 open EvalString
 
+module TlsStorage = Ephemeron.K1.Make(struct
+	type t = value
+	let equal = (==)
+	let hash v = match v with VInstance {ikind = ITls i} -> i | _ -> 0
+end)
+
 type var_info = {
 	vi_name : string;
 	vi_pos : pos;
@@ -34,9 +40,9 @@ type scope = {
 	(* The local start offset of the current scope. *)
 	local_offset : int;
 	(* The locals declared in the current scope. Maps variable IDs to local slots. *)
-	locals : (int,int) Hashtbl.t;
+	locals : int IntHashtbl.t;
 	(* The name of local variables. Maps local slots to variable names. Only filled in debug mode. *)
-	local_infos : (int,var_info) Hashtbl.t;
+	local_infos : var_info IntHashtbl.t;
 	(* The IDs of local variables. Maps variable names to variable IDs. *)
 	local_ids : (string,int) Hashtbl.t;
 }
@@ -44,6 +50,7 @@ type scope = {
 type env_kind =
 	| EKLocalFunction of int
 	| EKMethod of int * int
+	| EKMacro of int * int
 	| EKEntrypoint
 
 (* Compile-time information for environments. This information is static for all
@@ -58,7 +65,7 @@ type env_info = {
 	(* The environment kind. *)
 	kind : env_kind;
 	(* The name of capture variables. Maps local slots to variable names. Only filled in debug mode. *)
-	capture_infos : (int,var_info) Hashtbl.t;
+	capture_infos : var_info IntHashtbl.t;
 	(* The number of local variables. *)
 	num_locals : int;
 	(* The number of capture variables. *)
@@ -108,18 +115,20 @@ type env = {
 and eval = {
 	mutable env : env option;
 	thread : vthread;
+	mutable exception_stack : (pos * env_kind) list;
 	(* The threads current debug state *)
 	mutable debug_state : debug_state;
 	(* The currently active breakpoint. Set to a dummy value initially. *)
 	mutable breakpoint : breakpoint;
 	(* Map of all types that are currently being caught. Updated by `emit_try`. *)
-	caught_types : (int,bool) Hashtbl.t;
+	caught_types : bool IntHashtbl.t;
 	(* The most recently caught exception. Used by `debug_loop` to avoid getting stuck. *)
 	mutable caught_exception : value;
 	(* The value which was last returned. *)
 	mutable last_return : value option;
 	(* The debug channel used to synchronize with the debugger. *)
 	debug_channel : unit Event.channel;
+	eval_storage : value TlsStorage.t;
 }
 
 and debug_state =
@@ -155,8 +164,8 @@ type function_breakpoint = {
 type builtins = {
 	mutable instance_builtins : (int * value) list IntMap.t;
 	mutable static_builtins : (int * value) list IntMap.t;
-	constructor_builtins : (int,value list -> value) Hashtbl.t;
-	empty_constructor_builtins : (int,unit -> value) Hashtbl.t;
+	constructor_builtins : (value list -> value) IntHashtbl.t;
+	empty_constructor_builtins : (unit -> value) IntHashtbl.t;
 }
 
 type debug_scope_info = {
@@ -167,7 +176,7 @@ type debug_scope_info = {
 type context_reference =
 	| StackFrame of env
 	| Scope of scope * env
-	| CaptureScope of (int,var_info) Hashtbl.t * env
+	| CaptureScope of var_info IntHashtbl.t * env
 	| DebugScope of debug_scope_info * env
 	| Value of value * env
 	| Toplevel
@@ -248,7 +257,7 @@ and debug_socket = {
 (* Per-context debug information *)
 and debug = {
 	(* The registered breakpoints *)
-	breakpoints : (int,(int,breakpoint) Hashtbl.t) Hashtbl.t;
+	breakpoints : breakpoint IntHashtbl.t IntHashtbl.t;
 	(* The registered function breakpoints *)
 	function_breakpoints : ((int * int),function_breakpoint) Hashtbl.t;
 	(* Whether or not debugging is supported. Has various effects on the amount of
@@ -272,21 +281,27 @@ and context = {
 	mutable curapi : value MacroApi.compiler_api;
 	mutable type_cache : Type.module_type IntMap.t;
 	overrides : (Globals.path * string,bool) Hashtbl.t;
+	timer_ctx : Timer.timer_context;
+	mutable args : string list;
 	(* prototypes *)
 	mutable array_prototype : vprototype;
 	mutable string_prototype : vprototype;
 	mutable vector_prototype : vprototype;
 	mutable instance_prototypes : vprototype IntMap.t;
 	mutable static_prototypes : static_prototypes;
-	mutable constructors : value Lazy.t IntMap.t;
+	mutable constructors : value AtomicLazy.t IntMap.t;
+	fake_proto_cache : (int,vprototype) Hashtbl.t;
 	file_keys : Common.file_keys;
+	object_name_cache : (int list,int) Hashtbl.t;
 	get_object_prototype : 'a . context -> (int * 'a) list -> vprototype * (int * 'a) list;
 	(* eval *)
+	mutable next_thread_id : int Atomic.t;
 	toplevel : value;
-	eval : eval;
-	mutable evals : eval IntMap.t;
-	mutable exception_stack : (pos * env_kind) list;
+	eval : eval Thread_local_storage.t;
+	evals : (int,eval) ThreadSafeHashtbl.t;
 	max_stack_depth : int;
+	max_print_depth : int;
+	print_indentation : string option;
 }
 
 module GlobalState = struct
@@ -300,11 +315,6 @@ module GlobalState = struct
 
 	let stdlib : builtins option ref = ref None
 	let macro_lib : (string,value) Hashtbl.t = Hashtbl.create 0
-
-	let cleanup ctx =
-		(* curapi holds a reference to the typing context which we don't want to persist. Let's unset it so the
-		   context can be collected. *)
-		ctx.curapi <- Obj.magic ""
 end
 
 let get_ctx () = (!GlobalState.get_ctx_ref)()
@@ -322,20 +332,17 @@ let s_debug_state = function
 (* Misc *)
 
 let get_eval ctx =
-	let id = Thread.id (Thread.self()) in
-	if id = 0 then
-		ctx.eval
-	else
-		try
-			IntMap.find id ctx.evals
-		with Not_found ->
-			die "Cannot run Haxe code in a non-Haxe thread" __LOC__
+	Thread_local_storage.get_exn ctx.eval
 
+let current_thread_id ctx =
+	(get_eval ctx).thread.thread_id
 
-let rec kind_name eval kind =
+let kind_name eval kind =
 	let rec loop kind env = match kind with
 		| EKMethod(i1,i2) ->
 			Printf.sprintf "%s.%s" (rev_hash i1) (rev_hash i2)
+		| EKMacro(i1,i2) ->
+			Printf.sprintf "Macro call: %s.%s" (rev_hash i1) (rev_hash i2)
 		| EKLocalFunction i ->
 			begin match env with
 			| None -> Printf.sprintf "localFunction%i" i
@@ -353,10 +360,13 @@ let rec kind_name eval kind =
 
 let call_function f vl = f vl
 
-let object_fields o =
-	IntMap.fold (fun key index acc ->
-		(key,(o.ofields.(index))) :: acc
-	) o.oproto.pinstance_names []
+let object_fields o = match o.oproto with
+	| OProto proto ->
+		IntMap.fold (fun key index acc ->
+			(key,(o.ofields.(index))) :: acc
+		) proto.pinstance_names []
+	| ODictionary d ->
+		IntMap.fold (fun k v acc -> (k,v) :: acc) d []
 
 let instance_fields i =
 	IntMap.fold (fun name key acc ->
@@ -400,11 +410,9 @@ let exc v = throw v null_pos
 
 let exc_string str = exc (vstring (EvalString.create_ascii str))
 
-let error_message = exc_string
+let exc_string_p str p = throw (vstring (EvalString.create_ascii str)) p
 
-let flush_core_context f =
-	let ctx = get_ctx() in
-	ctx.curapi.MacroApi.flush_context f
+let error_message = exc_string
 
 (* Environment handling *)
 
@@ -435,7 +443,7 @@ let create_env_info static pfile pfile_key kind capture_infos num_locals num_cap
 let push_environment ctx info =
 	let eval = get_eval ctx in
 	let timer = if ctx.detail_times then
-		Timer.timer ["macro";"execution";kind_name eval info.kind]
+		Timer.start_timer ctx.timer_ctx ["macro";"execution";kind_name eval info.kind]
 	else
 		no_timer
 	in
@@ -466,7 +474,7 @@ let push_environment ctx info =
 		env_locals = locals;
 		env_captures = captures;
 		env_extra_locals = IntMap.empty;
-		env_parent = eval.env;
+		env_parent = if info.kind = EKEntrypoint then None else eval.env;
 		env_eval = eval;
 		env_stack_depth = stack_depth;
 	} in
@@ -499,7 +507,7 @@ let get_static_prototype_raise ctx path =
 
 let get_static_prototype ctx path p =
 	try get_static_prototype_raise ctx path
-	with Not_found -> Error.error (Printf.sprintf "[%i] Type not found: %s" ctx.ctx_id (rev_hash path)) p
+	with Not_found -> Error.raise_typing_error (Printf.sprintf "[%i] Type not found: %s" ctx.ctx_id (rev_hash path)) p
 
 let get_static_prototype_as_value ctx path p =
 	(get_static_prototype ctx path p).pvalue
@@ -509,37 +517,38 @@ let get_instance_prototype_raise ctx path =
 
 let get_instance_prototype ctx path p =
 	try get_instance_prototype_raise ctx path
-	with Not_found -> Error.error (Printf.sprintf "[%i] Instance prototype not found: %s" ctx.ctx_id (rev_hash path)) p
+	with Not_found -> Error.raise_typing_error (Printf.sprintf "[%i] Instance prototype not found: %s" ctx.ctx_id (rev_hash path)) p
 
 let get_instance_constructor_raise ctx path =
 	IntMap.find path ctx.constructors
 
 let get_instance_constructor ctx path p =
 	try get_instance_constructor_raise ctx path
-	with Not_found -> Error.error (Printf.sprintf "[%i] Instance constructor not found: %s" ctx.ctx_id (rev_hash path)) p
+	with Not_found -> Error.raise_typing_error (Printf.sprintf "[%i] Instance constructor not found: %s" ctx.ctx_id (rev_hash path)) p
 
 let get_special_instance_constructor_raise ctx path =
-	Hashtbl.find (get_ctx()).builtins.constructor_builtins path
+	IntHashtbl.find (get_ctx()).builtins.constructor_builtins path
 
 let get_proto_field_index_raise proto name =
 	IntMap.find name proto.pnames
 
 let get_proto_field_index proto name =
 	try get_proto_field_index_raise proto name
-	with Not_found -> Error.error (Printf.sprintf "Field index for %s not found on prototype %s" (rev_hash name) (rev_hash proto.ppath)) null_pos
+	with Not_found -> Error.raise_typing_error (Printf.sprintf "Field index for %s not found on prototype %s" (rev_hash name) (rev_hash proto.ppath)) null_pos
 
 let get_instance_field_index_raise proto name =
 	IntMap.find name proto.pinstance_names
 
 let get_instance_field_index proto name p =
 	try get_instance_field_index_raise proto name
-	with Not_found -> Error.error (Printf.sprintf "Field index for %s not found on prototype %s" (rev_hash name) (rev_hash proto.ppath)) p
+	with Not_found -> Error.raise_typing_error (Printf.sprintf "Field index for %s not found on prototype %s" (rev_hash name) (rev_hash proto.ppath)) p
 
 let is v path =
 	if path = key_Dynamic then
 		v <> vnull
 	else match v with
 	| VInt32 _ -> path = key_Int || path = key_Float
+	| VInt64 _ -> path = key_eval_integers_Int64
 	| VFloat f -> path = key_Float || (path = key_Int && f = (float_of_int (int_of_float f)) && f <= 2147483647. && f >= -2147483648.)
 	| VTrue | VFalse -> path = key_Bool
 	| VPrototype {pkind = PClass _} -> path = key_Class

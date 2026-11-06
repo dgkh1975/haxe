@@ -22,6 +22,8 @@
 
 package haxe.io;
 
+import haxe.Int32;
+
 class BytesInput extends Input {
 	var b:#if js js.lib.Uint8Array #elseif hl hl.Bytes #else BytesData #end;
 	#if !flash
@@ -138,15 +140,6 @@ class BytesInput extends Input {
 		java.lang.System.arraycopy(this.b, this.pos, buf.getData(), pos, len);
 		this.pos += len;
 		this.len -= len;
-		#elseif cs
-		var avail:Int = this.len;
-		if (len > avail)
-			len = avail;
-		if (len == 0)
-			throw new Eof();
-		cs.system.Array.Copy(this.b, this.pos, buf.getData(), pos, len);
-		this.pos += len;
-		this.len -= len;
 		#else
 		if (this.len == 0 && len > 0)
 			throw new Eof();
@@ -205,7 +198,7 @@ class BytesInput extends Input {
 	}
 
 	@:dox(hide)
-	override function readInt32():Int {
+	override function readInt32():Int32 {
 		return try b.readInt() catch (e:Dynamic) throw new Eof();
 	}
 

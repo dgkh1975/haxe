@@ -8,37 +8,33 @@ import haxe.io.*;
 class ExitCode {
 	static public var bin:String =
 	#if interp
-		"bin/interp/ExitCode";
+		"bin/eval/ExitCode.hxb";
 	#elseif neko
 		"bin/neko/ExitCode.n";
 	#elseif hl
-		"bin/hl/ExitCode.hl";
+		#if hlc
+			"bin/hlc/exitCode/ExitCode.exe";
+		#else
+			"bin/hl/ExitCode.hl";
+		#end
 	#elseif cpp
-		#if debug
+		#if cppia
+			"bin/cppia/ExitCode.cppia";
+		#elseif debug
 			"bin/cpp/ExitCode-debug";
 		#else
 			"bin/cpp/ExitCode";
 		#end
-	#elseif cs
-		#if debug
-			"bin/cs/bin/ExitCode-Debug.exe";
-		#else
-			"bin/cs/bin/ExitCode.exe";
-		#end
 	#elseif jvm
 		"bin/jvm/ExitCode.jar";
-	#elseif java
-		#if debug
-			"bin/java/ExitCode-Debug.jar";
-		#else
-			"bin/java/ExitCode.jar";
-		#end
 	#elseif python
 		"bin/python/ExitCode.py";
 	#elseif php
 		"bin/php/ExitCode/index.php";
 	#elseif lua
 		"bin/lua/ExitCode.lua";
+	#elseif js
+		"bin/js/ExitCode.js";
 	#else
 		null;
 	#end
@@ -90,6 +86,6 @@ class ExitCode {
 	}
 
 	static function main():Void {
-		Sys.exit(Std.parseInt(Sys.args()[0]));
+		Sys.exit(Std.parseInt(Sys.args()[#if cppia 1 #else 0 #end]));
 	}
 }

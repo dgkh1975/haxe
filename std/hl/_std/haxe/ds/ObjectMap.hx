@@ -69,7 +69,7 @@ class ObjectMap<K:{}, T> implements haxe.Constraints.IMap<K, T> {
 		var s = new StringBuf();
 		var keys = h.keysArray();
 		var values = h.valuesArray();
-		s.addChar('{'.code);
+		s.addChar("[".code);
 		for (i in 0...keys.length) {
 			if (i > 0)
 				s.add(", ");
@@ -77,7 +77,7 @@ class ObjectMap<K:{}, T> implements haxe.Constraints.IMap<K, T> {
 			s.add(" => ");
 			s.add(values[i]);
 		}
-		s.addChar('}'.code);
+		s.addChar("]".code);
 		return s.toString();
 	}
 
@@ -86,6 +86,14 @@ class ObjectMap<K:{}, T> implements haxe.Constraints.IMap<K, T> {
 		@:privateAccess h.clear();
 		#else
 		h = new hl.types.ObjectMap();
+		#end
+	}
+	
+	public function size():Int {
+		#if (hl_ver >= version("1.12.0"))
+		return h.size();
+		#else
+		return h.keysArray().length;
 		#end
 	}
 }

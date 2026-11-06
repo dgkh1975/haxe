@@ -79,10 +79,14 @@ import php.NativeIndexedArray;
 			Global.array_push(parts, '$key => ' + Std.string(value));
 		});
 
-		return '{' + Global.implode(', ', parts) + '}';
+		return "[" + Global.implode(", ", parts) + "]";
 	}
 
 	public inline function clear():Void {
 		data = new NativeIndexedArray();
+	}
+	
+	public inline function size():Int {
+		return Global.count(data);
 	}
 }

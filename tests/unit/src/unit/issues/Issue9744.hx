@@ -37,6 +37,25 @@ private class Vcs implements IVcs {
 	}
 }
 
+private class IntProp {
+	public var got:Bool = false;
+	public var set:Bool = false;
+
+	@:isVar public var value(get, set):Int = 0;
+
+	public function new() {}
+
+	function get_value() {
+		got = true;
+		return value;
+	}
+
+	function set_value(v) {
+		set = true;
+		return value = v;
+	}
+}
+
 #if eval
 /* We don't care about the actual extern behavior so there's no point in trying to get this test to
    work on all targets. The only important part here is that the typing doesn't choke on the missing
@@ -74,14 +93,11 @@ class NadakoB {
 }
 
 class Issue9744 extends unit.Test {
-	#if (cs && fast_cast && erase_generics)
-	#else
 	function testAbstractOverAbstractSelf() {
 		var ref = new Ref();
 		eq(1, ref.value = 1);
 		eq(1, ref.value);
 	}
-	#end
 
 	function testUnopProperties() {
 		var vcs = new Vcs(true);
@@ -93,6 +109,26 @@ class Issue9744 extends unit.Test {
 		t(ivcs.available);
 		f(!ivcs.available);
 		t(!(ivcs.available = false));
+
+		var intProp = new IntProp();
+		intProp.value++;
+		t(intProp.got);
+		t(intProp.set);
+
+		intProp = new IntProp();
+		++intProp.value;
+		t(intProp.got);
+		t(intProp.set);
+
+		intProp = new IntProp();
+		intProp.value--;
+		t(intProp.got);
+		t(intProp.set);
+
+		intProp = new IntProp();
+		--intProp.value;
+		t(intProp.got);
+		t(intProp.set);
 	}
 
 	#if eval

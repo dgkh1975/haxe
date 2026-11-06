@@ -31,6 +31,7 @@ import python.lib.socket.Socket in PSocket;
 import python.lib.Socket in PSocketModule;
 import python.lib.socket.Address in PAddress;
 import python.lib.Select;
+import python.lib.ssl.Errors;
 
 private class SocketInput extends haxe.io.Input {
 	var __s:PSocket;
@@ -55,7 +56,11 @@ private class SocketInput extends haxe.io.Input {
 		var r;
 		var data = buf.getData();
 		try {
-			r = __s.recv(len, 0);
+			try {
+				r = __s.recv(len, 0);
+			} catch(e:SSLWantReadError) {
+				return 0;
+			}
 			for (i in pos...(pos + r.length)) {
 				data.set(i, r[i - pos]);
 			}
@@ -93,7 +98,12 @@ private class SocketOutput extends haxe.io.Output {
 		try {
 			var data = buf.getData();
 			var payload = python.Syntax.code("{0}[{1}:{1}+{2}]", data, pos, len);
-			var r = __s.send(payload, 0);
+			var r = 0;
+			try {
+				r = __s.send(payload, 0);
+			} catch(e:SSLWantWriteError) {
+				return 0;
+			}
 			return r;
 		} catch (e:BlockingIOError) {
 			throw Blocked;
@@ -126,6 +136,11 @@ private class SocketOutput extends haxe.io.Output {
 		__s = new PSocket();
 	}
 
+    function __rebuildIoStreams():Void {
+		input = new SocketInput(__s);
+		output = new SocketOutput(__s);
+    }
+
 	public function close():Void {
 		__s.close();
 	}
@@ -151,6 +166,9 @@ private class SocketOutput extends haxe.io.Output {
 		__s.shutdown((read && write) ? PSocketModule.SHUT_RDWR : read ? PSocketModule.SHUT_RD : PSocketModule.SHUT_WR);
 
 	public function bind(host:Host, port:Int):Void {
+		// like the other targets, so a port can be bound again while connections on it are in TIME_WAIT
+		if (Sys.systemName() != "Windows")
+			__s.setsockopt(PSocketModule.SOL_SOCKET, PSocketModule.SO_REUSEADDR, true);
 		var host_str = host.toString();
 		__s.bind(Tuple2.make(host_str, port));
 	}

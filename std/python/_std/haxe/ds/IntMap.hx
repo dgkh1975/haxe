@@ -72,7 +72,7 @@ class IntMap<T> implements haxe.Constraints.IMap<Int, T> {
 
 	public function toString():String {
 		var s = new StringBuf();
-		s.add("{");
+		s.add("[");
 		var it = keys();
 		for (i in it) {
 			s.add(i);
@@ -81,11 +81,15 @@ class IntMap<T> implements haxe.Constraints.IMap<Int, T> {
 			if (it.hasNext())
 				s.add(", ");
 		}
-		s.add("}");
+		s.add("]");
 		return s.toString();
 	}
 
 	public inline function clear():Void {
 		h.clear();
+	}
+	
+	public inline function size():Int {
+		return h.length;
 	}
 }

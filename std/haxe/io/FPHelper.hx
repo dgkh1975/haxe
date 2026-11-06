@@ -22,6 +22,8 @@
 
 package haxe.io;
 
+import haxe.Int32;
+
 /**
 	Helper that converts between floating point and binary representation.
 	Always works in low-endian encoding.
@@ -31,8 +33,8 @@ class FPHelper {
 	// stored in helper
 	#elseif neko
 	static var i64tmp = new sys.thread.Tls<Int64>();
-	#elseif !(java || cs || cpp)
-	static var i64tmp = Int64.ofInt(0);
+	#elseif !(java || cpp)
+	static var i64tmp = Int64.fromInt(0);
 
 	static inline var LN2 = 0.6931471805599453; // Math.log(2)
 
@@ -95,7 +97,7 @@ class FPHelper {
 					av = av / Math.pow(2, exp) - 1.0;
 				}
 				var sig = Math.fround(av * 4503599627370496.); // 2^52
-				// Note: If "sig" is outside of the signed Int32 range, the result is unspecified in HL, C#, Java and Neko,
+				// Note: If "sig" is outside of the signed Int32 range, the result is unspecified in HL, Java and Neko.
 				var sig_l = Std.int(sig);
 				var sig_h = Std.int(sig / 4294967296.0);
 				i64.set_low(sig_l);
@@ -130,7 +132,7 @@ class FPHelper {
 	#if neko_v21
 	inline
 	#end
-	public static function i32ToFloat(i:Int):Float {
+	public static function i32ToFloat(i:Int32):Float {
 		#if neko
 		#if neko_v21
 		return untyped $itof(i, false);
@@ -146,15 +148,6 @@ class FPHelper {
 		#end
 		#elseif cpp
 		return untyped __global__.__hxcpp_reinterpret_le_int32_as_float32(i);
-		#elseif cs
-		var helper = new SingleHelper(0);
-		if (cs.system.BitConverter.IsLittleEndian) {
-			helper.i = i;
-		} else {
-			helper.i = ((i >>> 24) & 0xFF) | (((i >> 16) & 0xFF) << 8) | (((i >> 8) & 0xFF) << 16) | ((i & 0xFF) << 24);
-		}
-
-		return helper.f;
 		#elseif java
 		return java.lang.Float.FloatClass.intBitsToFloat(i);
 		#elseif flash
@@ -174,7 +167,7 @@ class FPHelper {
 	#if neko_v21
 	inline
 	#end
-	public static function floatToI32(f:Float):Int {
+	public static function floatToI32(f:Float):Int32 {
 		#if neko
 		#if neko_v21
 		return untyped $ftoi(f, false);
@@ -184,14 +177,6 @@ class FPHelper {
 		#end
 		#elseif cpp
 		return untyped __global__.__hxcpp_reinterpret_float32_as_le_int32(f);
-		#elseif cs
-		var helper = new SingleHelper(f);
-		if (cs.system.BitConverter.IsLittleEndian) {
-			return helper.i;
-		} else {
-			var i = helper.i;
-			return ((i >>> 24) & 0xFF) | (((i >> 16) & 0xFF) << 8) | (((i >> 8) & 0xFF) << 16) | ((i & 0xFF) << 24);
-		}
 		#elseif java
 		return java.lang.Float.FloatClass.floatToRawIntBits(f);
 		#elseif flash
@@ -211,7 +196,7 @@ class FPHelper {
 	#if neko_v21
 	inline
 	#end
-	public static function i64ToDouble(low:Int, high:Int):Float {
+	public static function i64ToDouble(low:Int32, high:Int32):Float {
 		#if neko
 		#if neko_v21
 		return untyped $itod(low, high, false);
@@ -231,17 +216,6 @@ class FPHelper {
 		#end
 		#elseif cpp
 		return untyped __global__.__hxcpp_reinterpret_le_int32s_as_float64(low, high);
-		#elseif cs
-		var helper = new FloatHelper(0);
-		if (cs.system.BitConverter.IsLittleEndian) {
-			helper.i = haxe.Int64.make(high, low);
-		} else {
-			var i1 = high, i2 = low;
-			var j2 = ((i1 >>> 24) & 0xFF) | (((i1 >> 16) & 0xFF) << 8) | (((i1 >> 8) & 0xFF) << 16) | ((i1 & 0xFF) << 24);
-			var j1 = ((i2 >>> 24) & 0xFF) | (((i2 >> 16) & 0xFF) << 8) | (((i2 >> 8) & 0xFF) << 16) | ((i2 & 0xFF) << 24);
-			helper.i = haxe.Int64.make(j1, j2);
-		}
-		return helper.f;
 		#elseif java
 		return java.lang.Double.DoubleClass.longBitsToDouble(Int64.make(high, low));
 		#elseif flash
@@ -272,7 +246,7 @@ class FPHelper {
 		if (helper == null) {
 			helpers.value = helper = neko.NativeArray.alloc(2);
 			helper[0] = neko.NativeArray.alloc(2);
-			helper[1] = haxe.Int64.ofInt(0);
+			helper[1] = haxe.Int64.fromInt(0);
 		}
 		var i64:haxe.Int64 = helper[1], int2 = helper[0];
 		untyped $dtoi(v, int2, false);
@@ -284,7 +258,7 @@ class FPHelper {
 		#else
 		var r = _double_bytes(v, false), i64 = i64tmp.value;
 		if (i64 == null)
-			i64 = i64tmp.value = haxe.Int64.ofInt(0);
+			i64 = i64tmp.value = haxe.Int64.fromInt(0);
 		@:privateAccess {
 			i64.set_low(untyped $sget(r, 0) | ($sget(r, 1) << 8) | ($sget(r, 2) << 16) | ($sget(r, 3) << 24));
 			i64.set_high(untyped $sget(r, 4) | ($sget(r, 5) << 8) | ($sget(r, 6) << 16) | ($sget(r, 7) << 24));
@@ -296,18 +270,6 @@ class FPHelper {
 			untyped __global__.__hxcpp_reinterpret_float64_as_le_int32_low(v));
 		#elseif java
 		return java.lang.Double.DoubleClass.doubleToRawLongBits(v);
-		#elseif cs
-		var helper = new FloatHelper(v);
-		if (cs.system.BitConverter.IsLittleEndian) {
-			return helper.i;
-		} else {
-			var i = helper.i;
-			var i1 = haxe.Int64.getHigh(i), i2 = haxe.Int64.getLow(i);
-			var j2 = ((i1 >>> 24) & 0xFF) | (((i1 >> 16) & 0xFF) << 8) | (((i1 >> 8) & 0xFF) << 16) | ((i1 & 0xFF) << 24);
-			var j1 = ((i2 >>> 24) & 0xFF) | (((i2 >> 16) & 0xFF) << 8) | (((i2 >> 8) & 0xFF) << 16) | ((i2 & 0xFF) << 24);
-
-			return haxe.Int64.make(j1, j2);
-		}
 		#elseif flash
 		var helper = helper;
 		helper.position = 0;
@@ -332,31 +294,3 @@ class FPHelper {
 		#end
 	}
 }
-
-#if cs
-@:meta(System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit))
-@:nativeGen @:struct private class SingleHelper {
-	@:meta(System.Runtime.InteropServices.FieldOffset(0))
-	public var i:Int;
-	@:meta(System.Runtime.InteropServices.FieldOffset(0))
-	public var f:Single;
-
-	public function new(f:Single) {
-		this.i = 0;
-		this.f = f;
-	}
-}
-
-@:meta(System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit))
-@:nativeGen @:struct private class FloatHelper {
-	@:meta(System.Runtime.InteropServices.FieldOffset(0))
-	public var i:haxe.Int64;
-	@:meta(System.Runtime.InteropServices.FieldOffset(0))
-	public var f:Float;
-
-	public function new(f:Float) {
-		this.i = haxe.Int64.ofInt(0);
-		this.f = f;
-	}
-}
-#end

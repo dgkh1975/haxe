@@ -6,13 +6,14 @@ import runci.Config.*;
 
 class Cpp {
 	static public var gotCppDependencies = false;
+	static var testCppia = false;
 
 	static public function getCppDependencies() {
 		if (gotCppDependencies) return;
 
 		//hxcpp dependencies
 		switch (systemName) {
-			case "Linux":
+			case "Linux" if (System.arch == Amd64):
 				Linux.requireAptPackages(["gcc-multilib", "g++-multilib"]);
 			case "Mac":
 				//pass
@@ -21,14 +22,23 @@ class Cpp {
 
 		//install and build hxcpp
 		try {
-			var path = getHaxelibPath("hxcpp");
+			final path = getHaxelibPath("hxcpp");
 			infoMsg('hxcpp has already been installed in $path.');
 		} catch(e:Dynamic) {
 			haxelibInstallGit("HaxeFoundation", "hxcpp", true);
-			var oldDir = Sys.getCwd();
-			changeDirectory(getHaxelibPath("hxcpp") + "tools/hxcpp/");
-			runCommand("haxe", ["-D", "source-header=''", "compile.hxml"]);
-			changeDirectory(oldDir);
+			runCommand("haxe", [
+				"--cwd", getHaxelibPath("hxcpp") + "tools/hxcpp/",
+				"-D", "source-header=''",
+				"compile.hxml"
+			]);
+			if (testCppia) {
+				final hxmlSuffix = if (System.arch == Arm64) "-arm64" else "";
+				runCommand("haxe", [
+					"--cwd", getHaxelibPath("hxcpp") + "project/",
+					"-D", "source-header=''",
+					'compile-cppia${hxmlSuffix}.hxml'
+				]);
+			}
 		}
 
 		gotCppDependencies = true;
@@ -40,36 +50,74 @@ class Cpp {
 		runCommand(bin, args);
 	}
 
+	static public function runCppia(script:String, ?host:String, ?run:(String, Array<String>) -> Void):Void {
+		if (run == null) run = runCommand;
+		var cmd:String;
+		var args:Array<String>;
+		if (host == null) {
+			cmd = "haxelib";
+			args = ["run", "hxcpp"];
+		} else {
+			cmd = host;
+			args = [];
+		}
+		run(cmd, args.concat([script]));
+		Sys.putEnv("CPPIA_IS_JIT", "1");
+		run(cmd, args.concat([script, "-jit"]));
+		Sys.putEnv("CPPIA_IS_JIT", null);
+	}
+
 	static public function run(args:Array<String>, testCompiled:Bool, testCppia:Bool) {
+		Cpp.testCppia = testCppia;
+
 		getCppDependencies();
 
-		var archFlag = if (systemName == "Windows") "HXCPP_M32" else "HXCPP_M64";
 		if (testCompiled) {
-			runCommand("rm", ["-rf", "cpp"]);
-			runCommand("haxe", ["compile-cpp.hxml", "-D", archFlag].concat(args));
+			runCommand("haxe", ["compile-cpp.hxml"].concat(args));
 			runCpp("bin/cpp/TestMain-debug", []);
+
+			changeDirectory(sysDir);
+			runCommand("haxe", args.concat(["compile-cpp.hxml"]));
+			runSysTest(FileSystem.fullPath("bin/cpp/Main-debug"));
+
+			changeDirectory(threadsDir);
+			runCommand("haxe", ["build.hxml", "-cpp", "export/cpp"]);
+			runCpp("export/cpp/Main");
+
+			changeDirectory(getMiscSubDir("cross", "eventLoop"));
+			runCommand("haxe", ["build-cpp.hxml", "--cpp", "cpp"]);
+			// TODO: check output like misc tests do
+			runCpp("cpp/Main");
+
+			if (Sys.systemName() == "Mac") {
+				changeDirectory(getMiscSubDir("cpp", "cppObjc"));
+				runCommand("haxe", ["build.hxml"]);
+				runCpp("bin/TestObjc-debug");
+			}
+
+			changeDirectory(getMiscSubDir(""));
+			runCommand("haxe", ["run-base.hxml", "--run", "Main", "cpp"]);
 		}
 
 		if (testCppia) {
+			changeDirectory(unitDir);
+
 			runCommand("haxe", ["compile-cppia-host.hxml"].concat(args));
 			runCommand("haxe", ["compile-cppia.hxml"].concat(args));
-			runCpp("bin/cppia/Host-debug", ["bin/unit.cppia"]);
-			runCpp("bin/cppia/Host-debug", ["bin/unit.cppia", "-jit"]);
+			runCppia("bin/unit.cppia", FileSystem.fullPath("bin/cppia/Host-debug"));
+
+			changeDirectory(sysDir);
+			runCommand("haxe", args.concat(["compile-cppia.hxml"]));
+			runCppia("bin/cppia/Main.cppia", runSysTest);
+
+			changeDirectory(threadsDir);
+			runCommand("haxe", ["build.hxml", "--cppia", "export/cppia/threads.cppia"]);
+			runCppia("export/cppia/threads.cppia");
+
+			changeDirectory(getMiscSubDir("cross", "eventLoop"));
+			runCommand("haxe", ["build-cpp.hxml", "--cppia", "bin/Main.cppia"]);
+			// TODO: check output like misc tests do
+			runCppia("bin/Main.cppia");
 		}
-
-		changeDirectory(sysDir);
-		runCommand("haxe", ["compile-cpp.hxml"].concat(args));
-		runCpp("bin/cpp/Main-debug", []);
-
-		changeDirectory(threadsDir);
-		runCommand("haxe", ["build.hxml", "-cpp", "export/cpp"]);
-		runCpp("export/cpp/Main");
-
-		// if (Sys.systemName() == "Mac")
-		// {
-		// 	changeDirectory(miscDir + "cppObjc");
-		// 	runCommand("haxe", ["build.hxml"]);
-		// 	runCpp("bin/TestObjc-debug");
-		// }
 	}
 }

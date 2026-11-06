@@ -1,33 +1,30 @@
 open Globals
 open Ast
 open DisplayTypes
+open DisplayTypes.DisplayMode
 open CompletionItem
 open Type
 open Genjson
 
 exception DisplayException of display_exception_kind
 
-let raise_diagnostics s = raise (DisplayException(DisplayDiagnostics s))
-let raise_statistics s = raise (DisplayException(Statistics s))
-let raise_module_symbols s = raise (DisplayException(ModuleSymbols s))
-let raise_metadata s = raise (DisplayException(Metadata s))
-let raise_signatures l isig iarg kind = raise (DisplayException(DisplaySignatures(Some(l,isig,iarg,kind))))
-let raise_hover item expected p = raise (DisplayException(DisplayHover(Some {hitem = item;hpos = p;hexpected = expected})))
-let raise_positions pl = raise (DisplayException(DisplayPositions pl))
-let raise_fields ckl cr subj = raise (DisplayException(DisplayFields(Some({fitems = ckl;fkind = cr;fsubject = subj}))))
-let raise_package sl = raise (DisplayException(DisplayPackage sl))
+let raise_hover item expected p = raise (DisplayException(DisplayHover({hitem = item;hpos = p;hexpected = expected})))
+let raise_fields ckl cr subj = raise (DisplayException(DisplayFields({fitems = ckl;fkind = cr;fsubject = subj})))
 
 (* global state *)
 let last_completion_result = ref (Array.make 0 (CompletionItem.make (ITModule ([],"")) None))
 let last_completion_pos = ref None
-let max_completion_items = ref 0
+
+let reset () =
+	last_completion_result := (Array.make 0 (CompletionItem.make (ITModule ([],"")) None));
+	last_completion_pos := None
 
 let filter_somehow ctx items kind subj =
 	let subject = match subj.s_name with
 		| None -> ""
-		| Some name-> String.lowercase name
+		| Some name-> ExtString.String.lowercase name
 	in
-	let subject_length = String.length subject in
+	let subject_length = ExtString.String.length subject in
 	let determine_cost s =
 		let get_initial_cost o =
 			if o = 0 then
@@ -35,7 +32,7 @@ let filter_somehow ctx items kind subj =
 			else begin
 				(* Consider `.` as anchors and determine distance from closest one. Penalize starting distance by factor 2. *)
 				try
-					let last_anchor = String.rindex_from s o '.' in
+					let last_anchor = ExtString.String.rindex_from s o '.' in
 					(o - (last_anchor + 1)) * 2
 				with Not_found ->
 					o * 2
@@ -56,12 +53,12 @@ let filter_somehow ctx items kind subj =
 				let o',new_cost = index_from o subject.[i] in
 				loop (i + 1) o' (cost + new_cost)
 			end else
-				cost + (if o = String.length s - 1 then 0 else 1) (* Slightly penalize for not-exact matches. *)
+				cost + (if o = ExtString.String.length s - 1 then 0 else 1) (* Slightly penalize for not-exact matches. *)
 		in
 		if subject_length = 0 then
 			0
 		else try
-			let o = String.index s subject.[0] in
+			let o = ExtString.String.index s subject.[0] in
 			loop 1 o (get_initial_cost o);
 		with Not_found | Invalid_argument _ ->
 			-1
@@ -69,7 +66,7 @@ let filter_somehow ctx items kind subj =
 	let rec loop acc items index =
 		match items with
 		| item :: items ->
-			let name = String.lowercase (get_filter_name item) in
+			let name = ExtString.String.lowercase (get_filter_name item) in
 			let cost = determine_cost name in
 			let acc = if cost >= 0 then
 				(item,index,cost) :: acc
@@ -90,7 +87,7 @@ let filter_somehow ctx items kind subj =
 	in
 	let ret = DynArray.create () in
 	let rec loop acc_types = match acc_types with
-		| (item,index,_) :: acc_types when DynArray.length ret < !max_completion_items ->
+		| (item,index,_) :: acc_types when DynArray.length ret < !ServerConfig.max_completion_items ->
 			DynArray.add ret (CompletionItem.to_json ctx (Some index) item);
 			loop acc_types
 		| _ ->
@@ -104,8 +101,8 @@ let patch_completion_subject subj =
 	match subj.s_name with
 	| Some name ->
 		let delta = p.pmax - p.pmin in
-		let name = if delta > 0 && delta < String.length name then
-			String.sub name 0 delta
+		let name = if delta > 0 && delta < ExtString.String.length name then
+			ExtString.String.sub name 0 delta
 		else
 			name
 		in
@@ -115,7 +112,7 @@ let patch_completion_subject subj =
 
 let fields_to_json ctx fields kind subj =
 	last_completion_result := Array.of_list fields;
-	let needs_filtering = !max_completion_items > 0 && Array.length !last_completion_result > !max_completion_items in
+	let needs_filtering = !ServerConfig.max_completion_items > 0 && Array.length !last_completion_result > !ServerConfig.max_completion_items in
 	(* let p_before = subj.s_insert_pos in *)
 	let subj = patch_completion_subject subj in
 	let ja,num_items = if needs_filtering then
@@ -123,7 +120,7 @@ let fields_to_json ctx fields kind subj =
 	else
 		List.mapi (fun i item -> CompletionItem.to_json ctx (Some i) item) fields,Array.length !last_completion_result
  	in
-	let did_filter = num_items = !max_completion_items in
+	let did_filter = num_items = !ServerConfig.max_completion_items in
 	last_completion_pos := if did_filter then Some subj.s_start_pos else None;
 	let filter_string = (match subj.s_name with None -> "" | Some name -> name) in
 	(* print_endline (Printf.sprintf "FIELDS OUTPUT:\n\tfilter_string: %s\n\t    num items: %i\n\t        start: %s\n\t     position: %s\n\t   before cut: %s"
@@ -159,40 +156,14 @@ let arg_index signatures signature_index param_index =
 
 let to_json ctx de =
 	match de with
-	| Statistics _
-	| ModuleSymbols _
-	| Metadata _ -> die "" __LOC__
-	| DisplaySignatures None ->
-		jnull
-	| DisplayDiagnostics dctx ->
-		DiagnosticsPrinter.json_of_diagnostics dctx
-	| DisplaySignatures Some(sigs,isig,iarg,kind) ->
-		(* We always want full info for signatures *)
-		let ctx = Genjson.create_context GMFull in
-		let fsig ((_,signature),doc) =
-			let fl = CompletionType.generate_function' ctx signature in
-			let fl = (match doc with None -> fl | Some d -> ("documentation",jstring (gen_doc_text d)) :: fl) in
-			jobject fl
-		in
-		let sigkind = match kind with
-			| SKCall -> 0
-			| SKArrayAccess -> 1
-		in
-		jobject [
-			"activeSignature",jint isig;
-			"activeParameter",jint (arg_index sigs isig iarg);
-			"signatures",jlist fsig sigs;
-			"kind",jint sigkind;
-		]
-	| DisplayHover None ->
-		jnull
-	| DisplayHover (Some hover) ->
+	| DisplayHover hover ->
 		let named_source_kind = function
 			| WithType.FunctionArgument name -> (0, name)
 			| WithType.StructureField name -> (1, name)
-			| _ -> die "" __LOC__
+			| LocalVariable name -> (2, name)
+			| ImplicitReturn -> die "" __LOC__
 		in
-		let ctx = Genjson.create_context GMFull in
+		let ctx = Genjson.create_full_config () in
 		let generate_name kind =
 			let i,si = named_source_kind kind in
 			jobject [
@@ -223,11 +194,51 @@ let to_json ctx de =
 			"item",CompletionItem.to_json ctx None hover.hitem;
 			"expected",expected;
 		]
-	| DisplayPositions pl ->
-		jarray (List.map generate_pos_as_location pl)
-	| DisplayFields None ->
-		jnull
-	| DisplayFields Some r ->
+	| DisplayFields r ->
 		fields_to_json ctx r.fitems r.fkind r.fsubject
-	| DisplayPackage pack ->
-		jarray (List.map jstring pack)
+
+let send_json_result_raise (com:Common.context) json =
+	let rh = com.request_scope.result_handler in
+	CompilerOutput.send_result_raise rh json
+
+let send_module_symbols_raise com s =
+	DisplayPosition.display_position#reset;
+	send_json_result_raise com s
+
+let send_hover_raise com item expected p =
+	DisplayPosition.display_position#reset;
+	let ctx = Genjson.create_full_config () in
+	send_json_result_raise com (to_json ctx (DisplayHover({hitem = item;hpos = p;hexpected = expected})))
+
+let send_signatures_raise com sigs isig iarg kind =
+	DisplayPosition.display_position#reset;
+	let ctx = Genjson.create_full_config () in
+	let fsig ((_,signature),doc) =
+		let fl = CompletionType.generate_function' ctx signature in
+		let fl = (match doc with None -> fl | Some d -> ("documentation",jstring (gen_doc_text d)) :: fl) in
+		jobject fl
+	in
+	let sigkind = match kind with
+		| SKCall -> 0
+		| SKArrayAccess -> 1
+	in
+	send_json_result_raise com (jobject [
+		"activeSignature",jint isig;
+		"activeParameter",jint (arg_index sigs isig iarg);
+		"signatures",jlist fsig sigs;
+		"kind",jint sigkind;
+	])
+
+let send_positions_raise com pl =
+	DisplayPosition.display_position#reset;
+	send_json_result_raise com (jarray (List.map generate_pos_as_location pl))
+
+let send_package_raise com sl =
+	DisplayPosition.display_position#reset;
+	send_json_result_raise com (jarray (List.map jstring sl))
+
+let send_no_result_raise (com:Common.context) =
+	let rh = com.request_scope.result_handler in
+	match com.display.dms_kind with
+	| DMDefault -> CompilerOutput.send_error_raise rh [jstring "No completion point"]
+	| _ -> CompilerOutput.send_result_raise rh jnull

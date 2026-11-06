@@ -27,6 +27,8 @@ class TestArguments extends utest.Test {
 		"(",
 		")",
 		"( )",
+		"^",
+		"a^b",
 
 		// backslashes
 		"\\",
@@ -68,43 +70,43 @@ class TestArguments extends utest.Test {
 
 	static public var bin:String =
 	#if interp
-		"TestArguments.hx";
+		"bin/eval/TestArguments.hxb";
 	#elseif neko
 		"bin/neko/TestArguments.n";
 	#elseif hl
-		"bin/hl/TestArguments.hl";
+		#if hlc
+			"bin/hlc/testArguments/TestArguments.exe";
+		#else
+			"bin/hl/TestArguments.hl";
+		#end
 	#elseif cpp
-		#if debug
+		#if cppia
+			"bin/cppia/TestArguments.cppia";
+		#elseif debug
 			"bin/cpp/TestArguments-debug";
 		#else
 			"bin/cpp/TestArguments";
 		#end
-	#elseif cs
-		#if debug
-			"bin/cs/bin/TestArguments-Debug.exe";
-		#else
-			"bin/cs/bin/TestArguments.exe";
-		#end
 	#elseif jvm
 		"bin/jvm/TestArguments.jar";
-	#elseif java
-		#if debug
-			"bin/java/TestArguments-Debug.jar";
-		#else
-			"bin/java/TestArguments.jar";
-		#end
 	#elseif python
 		"bin/python/TestArguments.py";
 	#elseif php
 		"bin/php/TestArguments/index.php";
 	#elseif lua
 		"bin/lua/TestArguments.lua";
+	#elseif js
+		"bin/js/TestArguments.js";
 	#else
 		null;
 	#end
 
 	function testArgs() {
-		var args = Sys.args();
+		final args = Sys.args();
+		#if cppia
+		args.shift();
+		args.remove("-jit");
+		#end
 		for (i in 0...expectedArgs.length) {
 			Assert.equals(expectedArgs[i], args[i]);
 		}

@@ -48,12 +48,15 @@ class StringExt {
 	}
 
 	public static function indexOf(me:String, str:String, startIndex:Null<Int>) {
+		if (str.length == 0) {
+			return java.lang.Math.max(0, java.lang.Math.min(startIndex == null ? 0 : startIndex, me.length));
+		}
 		return if (startIndex == null) (cast me : NativeString).indexOf(str) else (cast me : NativeString).indexOf(str, startIndex);
 	}
 
 	public static function lastIndexOf(me:String, str:String, ?startIndex:Int):Int {
-		if(str == '') {
-			return startIndex == null || startIndex > me.length ? me.length : startIndex;
+		if (str.length == 0) {
+			return java.lang.Math.max(0, java.lang.Math.min(startIndex == null ? me.length : startIndex, me.length));
 		}
 		if (startIndex == null || startIndex > me.length || startIndex < 0) {
 			startIndex = me.length - 1;
@@ -81,16 +84,14 @@ class StringExt {
 	}
 
 	public static function substr(me:String, pos:Int, ?len:Int):String {
-		var len:Int = len == null ? me.length : len;
-		if (pos != 0 && len < 0) {
-			return "";
-		}
+		var len:Int = len ?? me.length;
 		if (pos < 0) {
 			pos = me.length + pos;
 			if (pos < 0) {
 				pos = 0;
 			}
-		} else if (len < 0) {
+		}
+		if (len < 0) {
 			len = me.length + len - pos;
 		}
 		if (pos + len > me.length) {

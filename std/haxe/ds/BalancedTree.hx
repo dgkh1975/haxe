@@ -185,6 +185,14 @@ class BalancedTree<K, V> implements haxe.Constraints.IMap<K, V> {
 		}
 	}
 
+	static function sizeLoop<K,V>(node:TreeNode<K, V>):Int {
+		if (node != null) {
+			return sizeLoop(node.left) + 1 + sizeLoop(node.right);
+		} else {
+			return 0;
+		}
+	}
+
 	function merge(t1, t2) {
 		if (t1 == null)
 			return t2;
@@ -227,7 +235,7 @@ class BalancedTree<K, V> implements haxe.Constraints.IMap<K, V> {
 	}
 
 	public function toString() {
-		return root == null ? '{}' : '{${root.toString()}}';
+		return root == null ? "[]" : '[${root.toString()}]';
 	}
 
 	/**
@@ -235,6 +243,10 @@ class BalancedTree<K, V> implements haxe.Constraints.IMap<K, V> {
 	**/
 	public function clear():Void {
 		root = null;
+	}
+
+	public function size():Int {
+		return sizeLoop(root);
 	}
 }
 
@@ -264,6 +276,6 @@ class TreeNode<K, V> {
 		return this == null ? 0 : _height;
 
 	public function toString() {
-		return (left == null ? "" : left.toString() + ", ") + '$key=$value' + (right == null ? "" : ", " + right.toString());
+		return (left == null ? "" : left.toString() + ", ") + '$key => $value' + (right == null ? "" : ", " + right.toString());
 	}
 }

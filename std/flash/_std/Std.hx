@@ -32,12 +32,12 @@ import flash.Boot;
 		return flash.Boot.__instanceof(v, t);
 	}
 
-	public static inline function downcast<T:{}, S:T>(value:T, c:Class<S>):S {
+	public static inline function downcast<T:{}, S:T>(value:T, c:Class<S>):Null<S> {
 		return flash.Lib.as(value, c);
 	}
 
 	@:deprecated('Std.instance() is deprecated. Use Std.downcast() instead.')
-	public static inline function instance<T:{}, S:T>(value:T, c:Class<S>):S {
+	public static inline function instance<T:{}, S:T>(value:T, c:Class<S>):Null<S> {
 		return downcast(value, c);
 	}
 
@@ -49,13 +49,12 @@ import flash.Boot;
 		return untyped __int__(x);
 	}
 
-	public static function parseInt(x:String):Null<Int>
-		untyped {
-			var v = __global__["parseInt"](x);
-			if (__global__["isNaN"](v))
-				return null;
-			return v;
-		}
+	public static function parseInt(x:String):Null<Int> {
+		final v = flash.Lib.parseInt(x);
+		if (Math.isNaN(v))
+			return null;
+		return cast v;
+	}
 
 	public static function parseFloat(x:String):Float {
 		return untyped __global__["parseFloat"](x);

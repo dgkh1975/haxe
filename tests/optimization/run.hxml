@@ -1,6 +1,7 @@
 -p src
 -D analyzer-optimize
 -D analyzer-user-var-fusion
+-D loop-unroll-max-cost=0
 --each
 
 --main TestAnalyzer
@@ -16,10 +17,18 @@
 --interp
 
 --next
+--main TestCoroAssert
+-D haxe-next
+--no-output
+-js /dev/null
+
+--next
 -js testopt.js
 --macro Macro.register('Test')
 --macro Macro.register('TestJs')
 --macro Macro.register('TestLocalDce')
+--macro Macro.register('TestNadako')
+--macro Macro.register('TestCompoundBlockElements')
 --macro Macro.register('TestTreGeneration')
 --macro Macro.register('TestInlineConstructors')
 --macro Macro.register('issues')

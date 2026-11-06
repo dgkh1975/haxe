@@ -1,0 +1,454 @@
+open Globals
+open Ast
+open Json
+open Type
+open Define
+
+type cached_file = {
+	c_file_path : ClassPaths.resolved_file;
+	c_time : float;
+	c_package : string list;
+	c_decls : type_decl list;
+	mutable c_module_name : string option;
+	mutable c_pdi : Parser.parser_display_information;
+}
+
+type cached_directory = {
+	c_path : string;
+	mutable c_mtime : float;
+}
+
+type cached_native_lib = {
+	c_nl_mtime : float;
+	c_nl_files : (path,Ast.package) Hashtbl.t;
+}
+
+let get_module_name_of_cfile file cfile = match cfile.c_module_name with
+	| None ->
+		let name = Path.module_name_of_file file in
+		cfile.c_module_name <- Some name;
+		name
+	| Some name ->
+		name
+
+class context_cache (index : int) (sign : Digest.t) = object(self)
+	val files : (Path.UniqueKey.t,cached_file) Hashtbl.t = Hashtbl.create 0
+	val modules : (path,module_def) Hashtbl.t = Hashtbl.create 0
+	val binary_cache : (path,HxbData.module_cache) Hashtbl.t = Hashtbl.create 0
+	val fake_modules : (Path.UniqueKey.t,module_def) Hashtbl.t = Hashtbl.create 0
+	val tmp_binary_cache : (path,HxbData.module_cache) Hashtbl.t = Hashtbl.create 0
+	val get_hxb_module_mutex = Mutex.create ()
+	val removed_files = Hashtbl.create 0
+	val mutable json = JNull
+	val mutable initialized = false
+	val mutable last_access_time = Unix.gettimeofday ()
+	val children : (Digest.t,unit) Hashtbl.t = Hashtbl.create 0
+
+	(* files *)
+
+	method find_file key =
+		Hashtbl.find files key
+
+	method cache_file key path time data pdi =
+		Hashtbl.replace files key { c_file_path = path; c_time = time; c_package = fst data; c_decls = snd data; c_module_name = None; c_pdi = pdi }
+
+	method remove_file key =
+		try
+			let f = Hashtbl.find files key in
+			Hashtbl.remove files key;
+			Hashtbl.replace removed_files key f.c_file_path
+		with Not_found -> ()
+
+	(* Like remove_file, but doesn't keep track of the file *)
+	method remove_file_for_real key =
+		Hashtbl.remove files key
+
+	(* modules *)
+
+	method find_module path =
+		Hashtbl.find modules path
+
+	method find_module_opt path =
+		Hashtbl.find_opt modules path
+
+	method get_hxb_module path =
+		Mutex.protect get_hxb_module_mutex (fun () ->
+			try
+				Hashtbl.find tmp_binary_cache path
+			with Not_found ->
+				let mc = Hashtbl.find binary_cache path in
+				let m_extra = { mc.mc_extra with m_deps = mc.mc_extra.m_deps } in
+				let mc = { mc with mc_extra = m_extra } in
+				Hashtbl.add tmp_binary_cache path mc;
+				mc
+		)
+
+	method find_module_extra path =
+		try (Hashtbl.find modules path).m_extra
+		with Not_found -> (self#get_hxb_module path).mc_extra
+
+	method add_binary_cache m chunks =
+		Hashtbl.replace binary_cache m.m_path {
+			mc_path = m.m_path;
+			mc_id = m.m_id;
+			mc_chunks = chunks;
+			mc_extra = { m.m_extra with m_cache_state = MSGood; m_display_deps = None }
+		}
+
+	method cache_hxb_module config warn anon_identification m =
+		match m.m_extra.m_kind with
+		| MImport ->
+			Hashtbl.add modules m.m_path m;
+			None
+		| _ ->
+			Some (fun () ->
+				let writer = HxbWriter.create config warn anon_identification in
+				HxbWriter.write_module writer m;
+				HxbWriter.get_chunks writer
+			)
+
+	method cache_module_in_memory path m =
+		Hashtbl.replace modules path m
+
+	(* fake modules *)
+
+	method find_fake_module key =
+		Hashtbl.find fake_modules key
+
+	method add_fake_module key m =
+		Hashtbl.replace fake_modules key m
+
+	method remove_fake_module key =
+		Hashtbl.remove fake_modules key
+
+	method clear_temp_cache =
+		Hashtbl.clear tmp_binary_cache
+
+	method clear_cache =
+		Hashtbl.clear modules;
+		self#clear_temp_cache
+
+	(* Clears all module caches and user-file parse cache entries, preserving only stdlib/lib file parse cache. *)
+	method clear_modules =
+		Hashtbl.clear modules;
+		Hashtbl.clear binary_cache;
+		Hashtbl.clear fake_modules;
+		self#clear_temp_cache;
+		Hashtbl.clear removed_files;
+		Hashtbl.filter_map_inplace (fun _ cfile ->
+			match cfile.c_file_path.class_path#scope with
+			| ClassPath.User -> None
+			| ClassPath.Std | ClassPath.StdTarget | ClassPath.Lib -> Some cfile
+		) files
+
+	(* initialization *)
+
+	method is_initialized = initialized
+	method set_initialized value = initialized <- value
+
+	method get_sign = sign
+	method get_index = index
+	method get_files = files
+	method get_modules = modules
+
+	method get_hxb = binary_cache
+
+	(* TODO handle hxb cache there too *)
+	method get_removed_files = removed_files
+
+	method get_json = json
+	method set_json j = json <- j
+
+(* Pointers for memory inspection. *)
+	method get_pointers : unit array =
+		[|Obj.magic files;Obj.magic modules;Obj.magic binary_cache|]
+
+	(* access tracking *)
+
+	method update_access_time = last_access_time <- Unix.gettimeofday ()
+	method get_last_access_time = last_access_time
+
+	(* child contexts *)
+
+	method add_child (child_sign : Digest.t) = Hashtbl.replace children child_sign ()
+	method get_children = children
+end
+
+let create_directory path mtime = {
+	c_path = path;
+	c_mtime = mtime;
+}
+
+class virtual server_task (id : string list) (priority : int) = object(self)
+	method private virtual execute : unit
+
+	method run : unit =
+		self#execute
+
+	method get_priority = priority
+	method get_id = id
+end
+
+class arbitrary_task (id : string list) (priority : int) (f : unit -> unit) = object(self)
+	inherit server_task id priority
+
+	method private execute =
+		f ()
+end
+
+class cache = object(self)
+	val contexts : (string,context_cache) Hashtbl.t = Hashtbl.create 0
+	val mutable context_list = []
+	val haxelib : (string list * string option, string list) Hashtbl.t = Hashtbl.create 0
+	val directories : (string, cached_directory list) Hashtbl.t = Hashtbl.create 0
+	val native_libs : (string,cached_native_lib) Hashtbl.t = Hashtbl.create 0
+	val mutable tasks : (server_task PriorityQueue.t) = PriorityQueue.Empty
+
+	method clear =
+		Hashtbl.clear contexts;
+		context_list <- [];
+		Hashtbl.clear haxelib;
+		Hashtbl.clear directories;
+		Hashtbl.clear native_libs;
+		tasks <- PriorityQueue.Empty
+
+	(* Like clear, but preserves the file parse cache and directory cache within each context. *)
+	method soft_clear =
+		Hashtbl.iter (fun _ cc -> cc#clear_modules) contexts;
+		context_list <- [];
+		Hashtbl.clear haxelib;
+		Hashtbl.clear native_libs;
+		tasks <- PriorityQueue.Empty
+
+	(* contexts *)
+
+	method clear_temp_cache =
+		Hashtbl.iter (fun _ ctx -> ctx#clear_temp_cache) contexts
+
+	method get_context sign =
+		try
+			let cache = Hashtbl.find contexts sign in
+			cache#update_access_time;
+			if not (List.memq cache context_list) then
+				context_list <- cache :: context_list;
+			cache
+		with Not_found ->
+			let cache = new context_cache (Hashtbl.length contexts) sign in
+			cache#update_access_time;
+			context_list <- cache :: context_list;
+			Hashtbl.add contexts sign cache;
+			cache
+
+	method add_info sign desc platform (class_paths : ClassPaths.class_paths) defines =
+		let cc = self#get_context sign in
+		let jo = JObject [
+			"index",JInt cc#get_index;
+			"desc",JString desc;
+			"platform",JString (platform_name platform);
+			"classPaths",JArray (List.map (fun s -> JString s) class_paths#as_string_list);
+			"signature",JString (Digest.to_hex sign);
+			"defines",JArray (PMap.foldi (fun k v acc -> JObject [
+				"key",JString k;
+				"value",JString v;
+			] :: acc) defines.values []);
+		] in
+		cc#set_json jo;
+		cc#get_index
+
+	method get_contexts = context_list
+
+	(* files *)
+
+	method remove_files file =
+		Hashtbl.iter (fun _ cc-> cc#remove_file file) contexts
+
+	method get_context_files signs =
+		Hashtbl.fold (fun sign cc acc ->
+			if List.mem sign signs then Hashtbl.fold (fun file cfile acc -> (file,cfile) :: acc) cc#get_files acc
+			else acc
+		) contexts []
+
+	method get_files =
+		Hashtbl.fold (fun sign cc acc ->
+			Hashtbl.fold (fun file cfile acc -> (sign,file,cfile) :: acc) cc#get_files acc
+		) contexts []
+
+	(* modules *)
+
+	method iter_modules f =
+		Hashtbl.iter (fun _ cc ->
+			Hashtbl.iter (fun _ m ->
+				f m
+			) cc#get_modules
+		) contexts
+
+	method get_modules =
+		Hashtbl.fold (fun _ cc acc ->
+			Hashtbl.fold (fun _ m acc ->
+				m :: acc
+			) cc#get_modules acc
+		) contexts []
+
+	method taint_module m_path reason =
+		Hashtbl.iter (fun _ cc ->
+			Hashtbl.iter (fun _ m ->
+				if m.m_path = m_path then m.m_extra.m_cache_state <- MSBad (Tainted reason)
+			) cc#get_modules;
+			Hashtbl.iter (fun _ mc ->
+				if mc.HxbData.mc_path = m_path then
+					mc.HxbData.mc_extra.m_cache_state <- match reason, mc.mc_extra.m_cache_state with
+					| CheckDisplayFile, (MSBad _ as state) -> state
+					| _ -> MSBad (Tainted reason)
+			) cc#get_hxb
+		) contexts
+
+	method taint_modules file_key reason =
+		Hashtbl.iter (fun _ cc ->
+			Hashtbl.iter (fun _ m ->
+				if Path.UniqueKey.lazy_key m.m_extra.m_file = file_key then m.m_extra.m_cache_state <- MSBad (Tainted reason)
+			) cc#get_modules;
+			Hashtbl.iter (fun _ mc ->
+				if Path.UniqueKey.lazy_key mc.HxbData.mc_extra.m_file = file_key then
+					mc.HxbData.mc_extra.m_cache_state <- match reason, mc.HxbData.mc_extra.m_cache_state with
+					| CheckDisplayFile, (MSBad _ as state) -> state
+					| _ -> MSBad (Tainted reason)
+			) cc#get_hxb
+		) contexts
+
+	(* haxelibs *)
+
+	method find_haxelib key =
+		Hashtbl.find haxelib key
+
+	method cache_haxelib key value =
+		Hashtbl.replace haxelib key value
+
+	(* directories *)
+
+	method find_directories key =
+		Hashtbl.find directories key
+
+	method add_directories key value =
+		Hashtbl.replace directories key value
+
+	method remove_directory key value =
+		try
+			let current = self#find_directories key in
+			Hashtbl.replace directories key (List.filter (fun dir -> dir.c_path <> value) current);
+		with Not_found ->
+			()
+
+	method has_directory key value =
+		try
+			List.exists (fun dir -> dir.c_path = value) (self#find_directories key)
+		with Not_found ->
+			false
+
+	method add_directory key value =
+		try
+			let current = self#find_directories key in
+			self#add_directories key (value :: current)
+		with Not_found ->
+			self#add_directories key [value]
+
+	method clear_directories key =
+		Hashtbl.remove directories key
+
+	(* native lib *)
+
+	method add_native_lib key files timestamp =
+		Hashtbl.replace native_libs key { c_nl_files = files; c_nl_mtime = timestamp }
+
+	method get_native_lib key =
+		try Some (Hashtbl.find native_libs key)
+		with Not_found -> None
+
+	(* tasks *)
+
+	method add_task (task : server_task) : unit =
+		tasks <- PriorityQueue.insert tasks task#get_priority task
+
+	method has_task =
+		not (PriorityQueue.is_empty tasks)
+
+	method get_task =
+		let (_,task,queue) = PriorityQueue.extract tasks in
+		tasks <- queue;
+		task
+
+	method run_tasks recursive f =
+		let rec loop acc =
+			let current = tasks in
+			tasks <- Empty;
+			let f (ran_task,acc) prio task =
+				if f task then begin
+					task#run;
+					(true,acc)
+				end else
+					ran_task,PriorityQueue.insert acc prio task
+			in
+			let ran_task,folded = PriorityQueue.fold current f (false,acc) in
+			if recursive && ran_task then loop folded
+			else folded
+		in
+		tasks <- PriorityQueue.merge tasks (loop PriorityQueue.Empty);
+
+	(* context lifecycle *)
+
+	(* Remove context caches that haven't been accessed for [max_age_seconds] seconds.
+	   This prevents unbounded accumulation of stale contexts when defines change between
+	   compilations, creating new signatures each time.
+
+	   A stale context is only removed if no live (non-stale) context transitively
+	   reaches it via `children` edges. Otherwise the next dep walk on a live
+	   module would `get_context` the removed signature, get back a freshly-created
+	   empty context, and crash with "Could not find dependency". *)
+	method remove_stale_contexts max_age_seconds =
+		let now = Unix.gettimeofday () in
+		let threshold = now -. (float_of_int max_age_seconds) in
+		let is_stale cc = cc#get_last_access_time < threshold in
+		(* Short-circuit: nothing stale, nothing to do. *)
+		let any_stale = Hashtbl.fold (fun _ cc acc -> acc || is_stale cc) contexts false in
+		if not any_stale then 0
+		else begin
+			(* Transitive closure of "kept": start with non-stale contexts, follow
+			   each kept context's children edges. *)
+			let kept = Hashtbl.create 0 in
+			let worklist = ref [] in
+			Hashtbl.iter (fun sign cc ->
+				if not (is_stale cc) then begin
+					Hashtbl.replace kept sign ();
+					worklist := cc :: !worklist
+				end
+			) contexts;
+			while !worklist <> [] do
+				let cc = List.hd !worklist in
+				worklist := List.tl !worklist;
+				Hashtbl.iter (fun target_sign () ->
+					if not (Hashtbl.mem kept target_sign) then begin
+						Hashtbl.replace kept target_sign ();
+						match Hashtbl.find_opt contexts target_sign with
+						| Some target_cc -> worklist := target_cc :: !worklist
+						| None -> ()
+					end
+				) cc#get_children
+			done;
+			let to_remove = Hashtbl.fold (fun sign cc acc ->
+				if is_stale cc && not (Hashtbl.mem kept sign) then sign :: acc else acc
+			) contexts [] in
+			List.iter (fun sign -> Hashtbl.remove contexts sign) to_remove;
+			if to_remove <> [] then begin
+				let removed_set = Hashtbl.create (List.length to_remove) in
+				List.iter (fun s -> Hashtbl.replace removed_set s ()) to_remove;
+				context_list <- List.filter (fun cc -> not (Hashtbl.mem removed_set cc#get_sign)) context_list
+			end;
+			List.length to_remove
+		end
+
+	(* Pointers for memory inspection. *)
+	method get_pointers : unit array =
+		[|Obj.magic contexts;Obj.magic haxelib;Obj.magic directories;Obj.magic native_libs|]
+
+end
+
+type t = cache
